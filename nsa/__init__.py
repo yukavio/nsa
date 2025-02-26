@@ -1,0 +1,1 @@
+from .naive_nsa_fwd import attention
