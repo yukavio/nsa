@@ -244,7 +244,7 @@ class _attention(torch.autograd.Function):
         extra_kern_args = {}
 
         M = torch.empty((q.shape[0], q.shape[1]), device=q.device, dtype=torch.float32)
-        num_block = torch.cuda.get_device_properties("cuda").multi_processor_count * 4
+        num_block = torch.cuda.get_device_properties("cuda").multi_processor_count
         grid = lambda args: (num_block,)
         ctx.grid = grid
         _attn_fwd[grid](
