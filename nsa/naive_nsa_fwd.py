@@ -4,11 +4,6 @@ import triton
 import triton.language as tl
 from flash_attn.flash_attn_interface import flash_attn_qkvpacked_func as flash_attn_func
 
-# ENABLE_LHS_TO_TMEM is an experimental environment variable for Blackwell.
-# If it is set to 1 it can improve performance of Blackwell attention. However,
-# it defaults to 0 as it is known to cause correctness issues outside of the
-# _attn_fwd_tma kernel below.
-
 DEVICE = "cuda"
 HAS_FLASH = True
 TORCH_HAS_FP8 = False
@@ -35,14 +30,14 @@ def _attn_fwd_inner(
     STAGE: tl.constexpr,
     BLOCK_NUM: tl.constexpr,
 ):
-    
-    if STAGE == 2: # CAUSAL TILE
+
+    if STAGE == 2:  # CAUSAL TILE
         lo, hi = k_id, k_id + 1
     else:
         lo, hi = 0, BLOCK_NUM
-    
+
     lo, hi = lo.to(tl.int32), hi.to(tl.int32)
-    start_n = tl.load(select_id+lo) * BLOCK_N
+    start_n = tl.load(select_id + lo) * BLOCK_N
     if STAGE == 1:
         cond = seq_token_id >= start_n + BLOCK_N
     elif STAGE == 2:
@@ -52,7 +47,7 @@ def _attn_fwd_inner(
 
     # loop over k, v and update accumulator
     while cond:
-        start_n = tl.load(select_id+lo) * BLOCK_N
+        start_n = tl.load(select_id + lo) * BLOCK_N
         start_n = tl.multiple_of(start_n, BLOCK_N)
         cur_k_ptr = tl.advance(K_block_ptr, (0, start_n.to(tl.int32)))
         cur_v_ptr = tl.advance(V_block_ptr, (start_n.to(tl.int32), 0))
@@ -82,7 +77,11 @@ def _attn_fwd_inner(
         m_i = m_ij
         lo += 1
         if STAGE == 1:
-            cond = False if lo >= hi else seq_token_id >= tl.load(select_id+lo) * BLOCK_N + BLOCK_N   
+            cond = (
+                False
+                if lo >= hi
+                else seq_token_id >= tl.load(select_id + lo) * BLOCK_N + BLOCK_N
+            )
         elif STAGE == 2:
             cond = False
         else:
@@ -93,12 +92,12 @@ def _attn_fwd_inner(
 
 configs = [
     triton.Config({}, num_stages=s, num_warps=w)
-    for s in [3, 4, 7]
+    for s in [3, 4, 5, 6, 7, 8]
     for w in [4, 8, 16, 32]
 ]
 
 
-@triton.autotune(configs, key=["HEAD_DIM"])
+@triton.autotune(configs, key=["HEAD_DIM", "STAGE"])
 @triton.jit
 def _attn_fwd(
     Q,
@@ -143,7 +142,6 @@ def _attn_fwd(
             token_id.to(tl.int64) * stride_qt
             + group_id.to(tl.int64) * stride_qh * GROUPE_SIZE
         )
-        #kv_sparse_offset = tl.load((seq_offset-1)*BLOCK_NUM) * BLOCK_N
 
         kv_offset = (
             cum_seq_offset.to(tl.int64) * stride_kt + group_id.to(tl.int64) * stride_kh
@@ -205,7 +203,7 @@ def _attn_fwd(
                 q,
                 K_block_ptr,
                 V_block_ptr,  #
-                select_id + (seq_offset - 1)*BLOCK_NUM,
+                select_id + (seq_offset - 1) * BLOCK_NUM,
                 token_id - cum_seq_offset,
                 k_id,
                 qk_scale,  #
@@ -222,7 +220,7 @@ def _attn_fwd(
                 q,
                 K_block_ptr,
                 V_block_ptr,  #
-                select_id + (seq_offset - 1)*BLOCK_NUM,
+                select_id + (seq_offset - 1) * BLOCK_NUM,
                 token_id - cum_seq_offset,
                 k_id,
                 qk_scale,  #
@@ -243,7 +241,9 @@ def _attn_fwd(
 # B,H,T,D
 class _attention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, cu_seq_len, select_id, causal, sm_scale, block_size, block_num):
+    def forward(
+        ctx, q, k, v, cu_seq_len, select_id, causal, sm_scale, block_size, block_num
+    ):
         # shape constraints
         HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
         # when v is in float8_e5m2 it is transposed.
@@ -258,7 +258,7 @@ class _attention(torch.autograd.Function):
         extra_kern_args = {}
 
         M = torch.empty((q.shape[0], q.shape[1]), device=q.device, dtype=torch.float32)
-        num_block = torch.cuda.get_device_properties("cuda").multi_processor_count
+        num_block = torch.cuda.get_device_properties("cuda").multi_processor_count * 2
         grid = lambda args: (num_block,)
         ctx.grid = grid
         _attn_fwd[grid](
