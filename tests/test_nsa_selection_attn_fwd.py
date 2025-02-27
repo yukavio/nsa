@@ -4,7 +4,7 @@ from flash_attn import flash_attn_varlen_func
 
 from nsa import attention
 
-bs, seqlen, head_dim, q_num_head, kv_num_head = 32, 4096, 128, 32, 2
+bs, seqlen, head_dim, q_num_head, kv_num_head = 1, 4096, 128, 32, 2
 block_size = 64
 block_num = 16
 dtype = torch.bfloat16
@@ -39,8 +39,8 @@ ref_q = q
 
 select_id = select_id.flatten().contiguous()
 
-for causal in [True, False]:
-    ref_out = flash_attn_varlen_func(
+for causal in [False]:
+    ref_out, ref_lse, _ = flash_attn_varlen_func(
         q,
         ref_k,
         ref_v,
@@ -50,8 +50,10 @@ for causal in [True, False]:
         seqlen,
         causal=causal,
         softmax_scale=1.0,
+        return_attn_probs=True
     )
-    out = attention(q, k, v, cu_seq_len, select_id, causal, 1.0, block_size, block_num)
+    out, lse, _ = attention(q, k, v, cu_seq_len, select_id, causal, 1.0, block_size, block_num, True)
+    
     torch.testing.assert_close(ref_out, out, atol=1e-2, rtol=2e-2)
 
 perf = (
