@@ -4,9 +4,9 @@ from flash_attn import flash_attn_varlen_func
 
 from nsa import attention
 
-bs, seqlen, head_dim, q_num_head, kv_num_head = 32, 2048, 128, 64, 4
+bs, seqlen, head_dim, q_num_head, kv_num_head = 32, 4096, 128, 32, 2
 block_size = 64
-block_num = 4
+block_num = 16
 dtype = torch.bfloat16
 device = "cuda"
 torch.set_default_device(device)
@@ -23,7 +23,7 @@ seq_len = torch.Tensor([0] + [seqlen] * bs)
 cu_seq_len = torch.cumsum(seq_len, dim=0).to(torch.int32).to(device)
 
 total_block_num = seqlen // block_size
-select_id = torch.arange(block_num).repeat(bs, 1) * 2
+select_id = torch.arange(block_num).repeat(bs, 1)
 mask = torch.ones((bs, total_block_num), dtype=torch.bool)
 temp = torch.zeros_like(mask)
 mask.scatter_(1, select_id, temp)
@@ -76,7 +76,10 @@ ms = triton.testing.do_bench(
 
 print("flash-attn2 {} TFlops".format(perf(ms)))
 
-ms = triton.testing.do_bench(lambda: attention(q, k, v, cu_seq_len, select_id, causal, 1.0, block_size, block_num))
+ms = triton.testing.do_bench(
+    lambda: attention(
+        q, k, v, cu_seq_len, select_id, causal, 1.0, block_size, block_num
+    )
+)
 
 print("nsa {} TFlops".format(perf(ms)))
-
