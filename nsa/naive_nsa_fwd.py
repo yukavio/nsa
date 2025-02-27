@@ -2,7 +2,6 @@ import pytest
 import torch
 import triton
 import triton.language as tl
-import triton.tools.experimental_descriptor
 from flash_attn.flash_attn_interface import flash_attn_qkvpacked_func as flash_attn_func
 
 # ENABLE_LHS_TO_TMEM is an experimental environment variable for Blackwell.
@@ -27,34 +26,38 @@ def _attn_fwd_inner(
     q,  #
     K_block_ptr,
     V_block_ptr,  #
+    select_id,
     seq_token_id,
+    k_id,
     qk_scale,  #
     HEAD_DIM: tl.constexpr,
     BLOCK_N: tl.constexpr,  #
     STAGE: tl.constexpr,
-    N_CTX: tl.constexpr,
+    BLOCK_NUM: tl.constexpr,
 ):
-
-    if STAGE == 1:
-        # lo, hi = 0, ((((seq_token_id + BLOCK_N - 1) // BLOCK_N)) - 1) * BLOCK_N
-        lo, hi = 0, (seq_token_id // BLOCK_N) * BLOCK_N - 31
-        # tl.device_print("", hi)
-    elif STAGE == 2:
-        # tl.device_print("", (((seq_token_id + BLOCK_N - 1) // BLOCK_N) - 1) * BLOCK_N)
-        lo = (seq_token_id // BLOCK_N) * BLOCK_N
-        hi = lo + BLOCK_N
-        lo = tl.multiple_of(lo, BLOCK_N)
-    # causal = False
+    
+    if STAGE == 2: # CAUSAL TILE
+        lo, hi = k_id, k_id + 1
     else:
-        lo, hi = 0, N_CTX
+        lo, hi = 0, BLOCK_NUM
+    
     lo, hi = lo.to(tl.int32), hi.to(tl.int32)
-    K_block_ptr = tl.advance(K_block_ptr, (0, lo))
-    V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
+    start_n = tl.load(select_id+lo) * BLOCK_N
+    if STAGE == 1:
+        cond = seq_token_id >= start_n + BLOCK_N
+    elif STAGE == 2:
+        cond = seq_token_id < start_n + BLOCK_N
+    else:
+        cond = True
+
     # loop over k, v and update accumulator
-    for start_n in range(lo, hi, BLOCK_N):
+    while cond:
+        start_n = tl.load(select_id+lo) * BLOCK_N
         start_n = tl.multiple_of(start_n, BLOCK_N)
+        cur_k_ptr = tl.advance(K_block_ptr, (0, start_n.to(tl.int32)))
+        cur_v_ptr = tl.advance(V_block_ptr, (start_n.to(tl.int32), 0))
         # -- compute qk ----
-        k = tl.load(K_block_ptr)
+        k = tl.load(cur_k_ptr)
         qk = tl.dot(q, k)
         if STAGE == 2:
             mask = seq_token_id >= start_n + tl.arange(0, BLOCK_N)[None, :]
@@ -72,31 +75,37 @@ def _attn_fwd_inner(
         # -- update output accumulator --
         acc = acc * alpha[:, None]
         # update acc
-        v = tl.load(V_block_ptr)
+        v = tl.load(cur_v_ptr)
         p = p.to(tl.bfloat16)
         acc = tl.dot(p, v, acc)
         # update m_i and l_i
         m_i = m_ij
-        V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
-        K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
-    return acc, l_i, m_i
+        lo += 1
+        if STAGE == 1:
+            cond = False if lo >= hi else seq_token_id >= tl.load(select_id+lo) * BLOCK_N + BLOCK_N   
+        elif STAGE == 2:
+            cond = False
+        else:
+            cond = lo < hi
+
+    return acc, l_i, m_i, lo
 
 
 configs = [
-    triton.Config({"BLOCK_N": BN}, num_stages=s, num_warps=w)
-    for BN in [128, 256]
+    triton.Config({}, num_stages=s, num_warps=w)
     for s in [3, 4, 7]
     for w in [4, 8, 16, 32]
 ]
 
 
-@triton.autotune(configs, key=["N_CTX", "HEAD_DIM"])
+@triton.autotune(configs, key=["HEAD_DIM"])
 @triton.jit
 def _attn_fwd(
     Q,
     K,
     V,
     cu_seq_len,
+    select_id,
     sm_scale,
     M,
     Out,  #
@@ -107,14 +116,13 @@ def _attn_fwd(
     stride_vt,
     stride_vh,
     num_token,
-    num_seq,
     HEAD_DIM: tl.constexpr,  #
     BLOCK_N: tl.constexpr,  #
     STAGE: tl.constexpr,  #
     NUM_GROUP: tl.constexpr,
     GROUPE_SIZE: tl.constexpr,
+    BLOCK_NUM: tl.constexpr,
 ):
-
     start_id = tl.program_id(0)
     seq_offset = 1
     cum_seq_offset = 0
@@ -135,6 +143,7 @@ def _attn_fwd(
             token_id.to(tl.int64) * stride_qt
             + group_id.to(tl.int64) * stride_qh * GROUPE_SIZE
         )
+        #kv_sparse_offset = tl.load((seq_offset-1)*BLOCK_NUM) * BLOCK_N
 
         kv_offset = (
             cum_seq_offset.to(tl.int64) * stride_kt + group_id.to(tl.int64) * stride_kh
@@ -187,35 +196,40 @@ def _attn_fwd(
         q = tl.load(Q_block_ptr)
         # For causal = True, STAGE = 3 and _attn_fwd_inner gets 1 as its STAGE
         # For causal = False, STAGE = 1, and _attn_fwd_inner gets 3 as its STAGE
+        k_id = 0
         if STAGE & 1:
-            acc, l_i, m_i = _attn_fwd_inner(
+            acc, l_i, m_i, k_id = _attn_fwd_inner(
                 acc,
                 l_i,
                 m_i,
                 q,
                 K_block_ptr,
                 V_block_ptr,  #
+                select_id + (seq_offset - 1)*BLOCK_NUM,
                 token_id - cum_seq_offset,
+                k_id,
                 qk_scale,  #
                 HEAD_DIM,
                 BLOCK_N,  #
                 4 - STAGE,
-                N_CTX,
+                BLOCK_NUM,
             )
         if STAGE & 2:
-            acc, l_i, m_i = _attn_fwd_inner(
+            acc, l_i, m_i, _ = _attn_fwd_inner(
                 acc,
                 l_i,
                 m_i,
                 q,
                 K_block_ptr,
                 V_block_ptr,  #
+                select_id + (seq_offset - 1)*BLOCK_NUM,
                 token_id - cum_seq_offset,
+                k_id,
                 qk_scale,  #
                 HEAD_DIM,
                 BLOCK_N,  #
                 2,
-                N_CTX,
+                BLOCK_NUM,
             )
 
         # epilogue
@@ -229,7 +243,7 @@ def _attn_fwd(
 # B,H,T,D
 class _attention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, cu_seq_len, causal, sm_scale):
+    def forward(ctx, q, k, v, cu_seq_len, select_id, causal, sm_scale, block_size, block_num):
         # shape constraints
         HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
         # when v is in float8_e5m2 it is transposed.
@@ -239,7 +253,7 @@ class _attention(torch.autograd.Function):
         q_num_head, kv_num_head = q.shape[1], k.shape[1]
         group_size = q_num_head // kv_num_head
         assert group_size >= 16
-        o = torch.empty_like(q)
+        o = torch.zeros_like(q)
         stage = 3 if causal else 1
         extra_kern_args = {}
 
@@ -252,6 +266,7 @@ class _attention(torch.autograd.Function):
             k,
             v,
             cu_seq_len,
+            select_id,
             sm_scale,
             M,
             o,  #
@@ -262,11 +277,12 @@ class _attention(torch.autograd.Function):
             v.stride(0),
             v.stride(1),
             q.shape[0],
-            cu_seq_len.shape[0] - 1,
             HEAD_DIM=HEAD_DIM_K,  #
+            BLOCK_N=block_size,
             STAGE=stage,  #
             NUM_GROUP=kv_num_head,
             GROUPE_SIZE=group_size,
+            BLOCK_NUM=block_num,
             **extra_kern_args,
         )
 
