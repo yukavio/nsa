@@ -233,8 +233,8 @@ def _attn_fwd(
         # epilogue
         m_i += tl.math.log2(l_i)
         acc = acc / l_i[:, None]
-        # m_ptrs = M + off_hz * N_CTX + offs_m
-        # tl.store(m_ptrs, m_i)
+        m_ptrs = M + (cum_seq_offset + token_id) * GROUPE_SIZE * NUM_GROUP + group_id * GROUPE_SIZE + tl.arange(0, GROUPE_SIZE)
+        tl.store(m_ptrs, m_i)
         tl.store(O_block_ptr, acc.to(Out.type.element_ty))
 
 
@@ -242,7 +242,7 @@ def _attn_fwd(
 class _attention(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx, q, k, v, cu_seq_len, select_id, causal, sm_scale, block_size, block_num
+        ctx, q, k, v, cu_seq_len, select_id, causal, sm_scale, block_size, block_num, return_attn_probs=False
     ):
         # shape constraints
         HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
@@ -290,7 +290,10 @@ class _attention(torch.autograd.Function):
         ctx.sm_scale = sm_scale
         ctx.HEAD_DIM = HEAD_DIM_K
         ctx.causal = causal
-        return o
+        if return_attn_probs:
+            return o, M, None
+        else:
+            return o
 
 
 attention = _attention.apply
