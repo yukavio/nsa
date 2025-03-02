@@ -1,1 +1,1 @@
-from .naive_nsa_fwd import attention
+from .naive_selection_attn_fwd import attention as selection_attention
