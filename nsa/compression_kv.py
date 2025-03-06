@@ -57,7 +57,7 @@ def _compress_fwd(x, w, out, cu_input_len, cu_out_len, num_heads: tl.constexpr,
 #     key=['num_heads', 'head_dim', 'block_stride', 'block_size'],
 # )
 @triton.jit
-def _compress_bwd(
+def _compress_bwd_dw(
     x, grad_out, grad_w,
     cu_input_len, cu_out_len,
     num_heads: tl.constexpr,
@@ -170,7 +170,7 @@ class _compress_kv(torch.autograd.Function):
         grid = lambda meta: (cu_seq_len.numel()-1, NUM_HEAD, block_size)
         
         # 计算k的梯度
-        _compress_bwd[grid](
+        _compress_bwd_dw[grid](
             k, dck, dw_k,
             cu_seq_len, cu_out_len,
             NUM_HEAD, HEAD_DIM,
@@ -179,7 +179,7 @@ class _compress_kv(torch.autograd.Function):
         )
         
         # 计算v的梯度
-        _compress_bwd[grid](
+        _compress_bwd_dw[grid](
             v, dcv, dw_v,
             cu_seq_len, cu_out_len,
             NUM_HEAD, HEAD_DIM,
