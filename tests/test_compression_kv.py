@@ -42,29 +42,3 @@ for i in range(bs):
         out_idx += 1
 
 torch.testing.assert_close(c_k, ref_k, rtol=1e-2, atol=1e-2)
-
-
-
-# ref_k = k.reshape(bs, seqlen, kv_num_head, head_dim)
-# ref_v = v.reshape(bs, seqlen, kv_num_head, head_dim)
-
-# b_k = ref_k[0].unsqueeze(0).permute(0, 3, 1, 2).reshape(1, head_dim, -1)
-# w_k = w_kv[0].reshape(1, 1, kv_num_head*block_size)
-# ref_ck = conv1d(b_k, w_k, stride=block_stride, groups=head_dim) 
-
-# print(ref_ck)
-# pid (0, 0, 0) idx ( 1,  32): 49.190071
-# pid (0, 0, 0) idx ( 1,  33): 121.744659
-# pid (0, 0, 0) idx ( 1,  34): -20.112074
-# pid (0, 0, 0) idx ( 1,  35): -2.807146
-# pid (0, 0, 0) idx ( 1,  36): -66.700356
-# pid (0, 0, 0) idx ( 1,  37): -7.357799
-# pid (0, 0, 0) idx ( 1,  38): -130.650192
-# pid (0, 0, 0) idx ( 1,  39): -48.315445
-# pid (0, 0, 0) idx ( 1,  40): -17.515280
-# pid (0, 0, 0) idx ( 1,  41): 122.883614
-# pid (0, 0, 0) idx ( 1,  42): -92.868103
-# pid (0, 0, 0) idx ( 1,  43): -34.701790
-# pid (0, 0, 0) idx ( 1,  44): -3.129343
-# pid (0, 0, 0) idx ( 1,  45): -57.839584
-# pid (0, 0, 0) idx ( 1,  46): 87.838249
