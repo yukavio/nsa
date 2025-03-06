@@ -162,29 +162,28 @@ class _compress_kv(torch.autograd.Function):
         block_stride = block_stride_tensor.item()
         block_size = block_size_tensor.item()
         
-        # 初始化梯度（使用float32精度）
         dw_k = torch.zeros_like(w_k, dtype=torch.float32)
         dw_v = torch.zeros_like(w_v, dtype=torch.float32)
         
-        # 配置并行参数
+        
         grid = lambda meta: (cu_seq_len.numel()-1, NUM_HEAD, block_size)
         
-        # 计算k的梯度
+        # 计算dw_k的梯度
         _compress_bwd_dw[grid](
             k, dck, dw_k,
             cu_seq_len, cu_out_len,
             NUM_HEAD, HEAD_DIM,
             block_stride, block_size,
-            BLOCK_M = 32
+            BLOCK_M = 32 # NOTE: There is bug if we set the parameter to be autotune by @triton.autotune
         )
         
-        # 计算v的梯度
+        # 计算dw_v的梯度
         _compress_bwd_dw[grid](
             v, dcv, dw_v,
             cu_seq_len, cu_out_len,
             NUM_HEAD, HEAD_DIM,
             block_stride, block_size,
-            BLOCK_M = 32
+            BLOCK_M = 32 # NOTE: Same as line 177
         )
         
         return None, None, dw_k, dw_v, None, None, None
