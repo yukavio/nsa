@@ -109,6 +109,7 @@ def _compress_bwd_dw(
     tl.atomic_add(grad_w_ptr, accumulator.to(tl.float32))
 
 
+@triton.jit
 def _compress_bwd_dx(
     grad_out, w, grad_x,
     cu_input_len, cu_out_len,
