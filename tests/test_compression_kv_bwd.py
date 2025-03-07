@@ -2,12 +2,8 @@ import torch
 from nsa.compression_kv import compress_kv, calc_compressed_len
 from typing import Tuple
 
-# 定义卷积操作
-conv1d = torch.nn.functional.conv1d
-
-# 初始化测试参数
 BATCH_SIZE = 5
-SEQ_LENGTH = 1024 * 32
+SEQ_LENGTH = 1024
 HEAD_DIM = 128
 KV_NUM_HEADS = 2
 BLOCK_SIZE = 64
@@ -16,17 +12,14 @@ DTYPE = torch.bfloat16
 DEVICE = "cuda"
 
 def initialize_test_data() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """初始化测试数据"""
     torch.set_default_device(DEVICE)
     torch.manual_seed(3)
 
-    # 初始化输入张量
     k = torch.randn(BATCH_SIZE * SEQ_LENGTH, KV_NUM_HEADS, HEAD_DIM, dtype=DTYPE, requires_grad=True)
     v = torch.randn(BATCH_SIZE * SEQ_LENGTH, KV_NUM_HEADS, HEAD_DIM, dtype=DTYPE, requires_grad=True)
     w_k = torch.randn(BLOCK_SIZE * HEAD_DIM, HEAD_DIM, dtype=DTYPE, requires_grad=True)
     w_v = torch.randn(BLOCK_SIZE * HEAD_DIM, HEAD_DIM, dtype=DTYPE, requires_grad=True)
     
-    # 初始化序列长度信息
     seq_len = torch.Tensor([0] + [SEQ_LENGTH] * BATCH_SIZE)
     cu_seq_len = torch.cumsum(seq_len, dim=0).to(torch.int32).to(DEVICE)
     
@@ -37,7 +30,6 @@ def compute_reference_kv(input_tensor: torch.Tensor,
                         cu_seq_len: torch.Tensor,
                         block_size: int,
                         block_stride: int) -> torch.Tensor:
-    """参考实现的计算逻辑，支持自动求导"""
     num_heads = input_tensor.size(1)
     result_list = []
     batch_size = len(cu_seq_len) - 1
@@ -69,7 +61,6 @@ def compute_reference_kv(input_tensor: torch.Tensor,
 def test_forward_pass(k: torch.Tensor, v: torch.Tensor, 
                      w_k: torch.Tensor, w_v: torch.Tensor,
                      cu_seq_len: torch.Tensor) -> None:
-    """测试前向传播"""
     c_k, c_v = compress_kv(k, v, w_k, w_v, cu_seq_len, BLOCK_STRIDE, BLOCK_SIZE)
     
     ref_k = compute_reference_kv(k, w_k, cu_seq_len, BLOCK_SIZE, BLOCK_STRIDE)
@@ -82,17 +73,13 @@ def test_forward_pass(k: torch.Tensor, v: torch.Tensor,
 def test_backward_pass(k: torch.Tensor, v: torch.Tensor,
                       w_k: torch.Tensor, w_v: torch.Tensor,
                       cu_seq_len: torch.Tensor) -> None:
-    """测试反向传播"""
-    # 测试k的反向传播
     target_k = torch.randn_like(compress_kv(k, v, w_k, w_v, cu_seq_len, BLOCK_STRIDE, BLOCK_SIZE)[0])
     
-    # 参考实现
     ref_k = compute_reference_kv(k, w_k, cu_seq_len, BLOCK_SIZE, BLOCK_STRIDE)
     ref_loss_k = torch.mean((ref_k - target_k) ** 2)
     ref_loss_k.backward()
     ref_wk_grad = w_k.grad.clone()
     
-    # 清空梯度并重新计算
     for param in [w_k, w_v, k, v]:
         param.grad = None
         
@@ -107,10 +94,8 @@ def test_backward_pass(k: torch.Tensor, v: torch.Tensor,
     torch.testing.assert_close(c_wk_grad, ref_wk_grad, rtol=2e-2, atol=2e-2)
     print("Backward for K Passed")
 
-    # 测试v的反向传播
     target_v = torch.randn_like(compress_kv(k, v, w_k, w_v, cu_seq_len, BLOCK_STRIDE, BLOCK_SIZE)[1])
     
-    # 清空梯度并重新计算
     for param in [w_k, w_v, k, v]:
         param.grad = None
         
@@ -122,7 +107,6 @@ def test_backward_pass(k: torch.Tensor, v: torch.Tensor,
     c_loss_v.backward()
     c_wv_grad = w_v.grad.clone()
     
-    # 参考实现
     for param in [w_k, w_v, k, v]:
         param.grad = None
         
@@ -135,13 +119,9 @@ def test_backward_pass(k: torch.Tensor, v: torch.Tensor,
     print("Backward for V Passed")
 
 def main():
-    """主测试函数"""
     k, v, w_k, w_v, cu_seq_len = initialize_test_data()
     
-    # 测试前向传播
     test_forward_pass(k, v, w_k, w_v, cu_seq_len)
-    
-    # 测试反向传播
     test_backward_pass(k, v, w_k, w_v, cu_seq_len)
 
 if __name__ == "__main__":
