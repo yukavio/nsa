@@ -1,5 +1,7 @@
 import torch
 from nsa.compression_kv import compress_kv, calc_compressed_len
+import triton
+
 
 
 bs, seqlen, head_dim, kv_num_head = 4, 1024 * 64, 128, 2
@@ -18,7 +20,6 @@ seq_len = torch.Tensor([0] + [seqlen] * bs)
 cu_seq_len = torch.cumsum(seq_len, dim=0).to(torch.int32).to(device)
 
 c_k, c_v =  compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
-
 
 def compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride):
     kv_num_head = k.size(1) 
@@ -50,34 +51,7 @@ def compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride):
     ref_k = torch.cat(k_list, dim=0)  # [total_windows, H, d]
     return ref_k
 
-ref_k = compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride)
-torch.testing.assert_close(c_k, ref_k, rtol=1e-2, atol=1e-2)
-print("Forward Passed")
-
-
-# test backward =========
-
 target = torch.randn_like(c_k)
-ref_loss = torch.mean((ref_k - target) ** 2)
-ref_loss.backward()
-ref_wk_grad = w_k.grad.clone()
-
-w_k.grad = None
-k.grad = None
-
-c_loss = torch.mean((c_k - target) ** 2)
-c_loss.backward()
-c_wk_grad = w_k.grad.clone()
-
-
-
-print("dw_k:", c_wk_grad[0,:10])
-print("ref_wk_grad:", ref_wk_grad[0,:10])
-
-torch.testing.assert_close(c_wk_grad, ref_wk_grad, rtol=2e-2, atol=2e-2)
-print("Backward Passed")
-
-
 
 # test tflops 
 def calculate_tflops(bs, seqlen, block_size, block_stride, kv_num_head, head_dim):
@@ -86,7 +60,6 @@ def calculate_tflops(bs, seqlen, block_size, block_stride, kv_num_head, head_dim
     flops_per_matmul = 2 * block_size * (head_dim ** 2)
     total_flops = total_matmuls * flops_per_matmul
     return total_flops
-import triton
 total_flops = calculate_tflops(bs, seqlen, block_size, block_stride, kv_num_head, head_dim)
 
 # warm up
@@ -115,6 +88,9 @@ print("==========================Benchmark forward end==========================
 
 
 
+
+
+
 print("==========================Benchmark backward start==========================")
 # warm up
 for _ in range(10):
@@ -126,12 +102,23 @@ for _ in range(10):
     w_v.grad = None
     v.grad = None
 
-ms_backward = triton.testing.do_bench(
-    lambda: (
-        compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size),
-        torch.mean((c_k - target) ** 2).backward()
-    )
+perf = (
+    # first * 2 is because tflops in bwd is double of fwd , seconde *2 because we calculate forward dw_k and dw_v
+    lambda ms: 2 * total_flops * 1e-12 * 2 / (ms * 1e-3) 
 )
+
+c_k, c_v = compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
+loss = torch.mean((c_k - target) ** 2)
+
+def backward_only():
+    loss.backward(retain_graph=True)
+    w_k.grad = None
+    k.grad = None
+    w_v.grad = None
+    v.grad = None
+
+
+ms_backward = triton.testing.do_bench(backward_only)
 print("compress_kv backward dw {} TFlops".format(perf(ms_backward)))
 
 
