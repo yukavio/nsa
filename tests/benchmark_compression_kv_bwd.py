@@ -89,7 +89,7 @@ def calculate_tflops(bs, seqlen, block_size, block_stride, kv_num_head, head_dim
 import triton
 total_flops = calculate_tflops(bs, seqlen, block_size, block_stride, kv_num_head, head_dim)
 
-# 预热
+# warm up
 print("==========================Benchmark forward start==========================")
 for _ in range(10):
     compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
