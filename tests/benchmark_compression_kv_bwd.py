@@ -126,7 +126,6 @@ for _ in range(10):
     w_v.grad = None
     v.grad = None
 
-# 测量compress_kv反向
 ms_backward = triton.testing.do_bench(
     lambda: (
         compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size),
