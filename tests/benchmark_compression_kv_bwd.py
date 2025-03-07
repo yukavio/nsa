@@ -2,7 +2,7 @@ import torch
 from nsa.compression_kv import compress_kv, calc_compressed_len
 
 
-bs, seqlen, head_dim, kv_num_head = 5, 1024, 128, 2
+bs, seqlen, head_dim, kv_num_head = 4, 1024 * 64, 128, 2
 block_size, block_stride = 64, 16
 dtype = torch.bfloat16
 device = "cuda"
@@ -96,7 +96,7 @@ for _ in range(10):
     compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride)
     
 perf = (
-    lambda ms: total_flops * 1e-12 / (ms * 1e-3)
+    lambda ms: total_flops * 1e-12 * 2 / (ms * 1e-3) # *2 because we calculate forward w and forward v
 )
 ms = triton.testing.do_bench(
     lambda: compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
@@ -115,5 +115,25 @@ print("==========================Benchmark forward end==========================
 
 
 
-# print("==========================Benchmark backward start==========================")
-# print("==========================Benchmark backward end==========================")
+print("==========================Benchmark backward start==========================")
+# warm up
+for _ in range(10):
+    c_k, c_v = compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
+    c_loss = torch.mean((c_k - target) ** 2)
+    c_loss.backward()
+    w_k.grad = None
+    k.grad = None
+    w_v.grad = None
+    v.grad = None
+
+# 测量compress_kv反向
+ms_backward = triton.testing.do_bench(
+    lambda: (
+        compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size),
+        torch.mean((c_k - target) ** 2).backward()
+    )
+)
+print("compress_kv backward dw {} TFlops".format(perf(ms_backward)))
+
+
+print("==========================Benchmark backward end==========================")
