@@ -143,7 +143,6 @@ def _compress_bwd_dx(
             other=0.0
         )
         
-        accumulator = tl.zeros((BLOCK_M, head_dim), dtype=tl.float32)
         for j in range(block_size):
             w_ptr_j = w_ptr + j * head_dim * head_dim
             w_data = tl.load(w_ptr_j + off_k[:, None] * head_dim + off_n[None, :])
@@ -156,7 +155,6 @@ def _compress_bwd_dx(
             accumulator_j = tl.dot(grad_out_data, w_data.T)
             accumulator_j = accumulator_j.to(tl.float32)
             
-            # 立即将梯度累加到对应的输入位置
             tl.atomic_add(grad_x_ptr_j, accumulator_j, mask=valid_input[:, None])
         
         
