@@ -119,7 +119,7 @@ def _compress_bwd_dx(
     block_size: tl.constexpr,
     BLOCK_M: tl.constexpr
 ):
-    pass
+    pass    
 
 
 # k/v: [num_token, NUM_HEAD, HEAD_DIM]
@@ -185,14 +185,20 @@ class _compress_kv(torch.autograd.Function):
         
         # 计算k的梯度
         _compress_bwd_dx[grid](
-            dck, w_k, dk, cu_seq_len, cu_out_len, NUM_HEAD, HEAD_DIM,
-            block_stride, block_size, BLOCK_M = 32
+            dck, w_k, dk, 
+            cu_seq_len, cu_out_len,
+            NUM_HEAD, HEAD_DIM,
+            block_stride, block_size, 
+            BLOCK_M = 32
         )
         
         # 计算v的梯度
         _compress_bwd_dx[grid](
-            dcv, w_v, dv, cu_seq_len, cu_out_len, NUM_HEAD, HEAD_DIM,
-            block_stride, block_size, BLOCK_M = 32
+            dcv, w_v, dv, 
+            cu_seq_len, cu_out_len, 
+            NUM_HEAD, HEAD_DIM,
+            block_stride, block_size, 
+            BLOCK_M = 32
         )
         
         # 计算w_k的梯度
@@ -201,7 +207,7 @@ class _compress_kv(torch.autograd.Function):
             cu_seq_len, cu_out_len,
             NUM_HEAD, HEAD_DIM,
             block_stride, block_size,
-            BLOCK_M = 32
+            BLOCK_M = 64
         )
         
         # 计算w_v的梯度
@@ -210,7 +216,7 @@ class _compress_kv(torch.autograd.Function):
             cu_seq_len, cu_out_len,
             NUM_HEAD, HEAD_DIM,
             block_stride, block_size,
-            BLOCK_M = 32 
+            BLOCK_M = 64 
         )
         
         return dk, dv, dw_k, dw_v, None, None, None

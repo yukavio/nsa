@@ -7,7 +7,7 @@ conv1d = torch.nn.functional.conv1d
 
 # 初始化测试参数
 BATCH_SIZE = 5
-SEQ_LENGTH = 1024
+SEQ_LENGTH = 1024 * 32
 HEAD_DIM = 128
 KV_NUM_HEADS = 2
 BLOCK_SIZE = 64
