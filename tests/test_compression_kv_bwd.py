@@ -3,7 +3,7 @@ from nsa.compression_kv import compress_kv, calc_compressed_len
 from typing import Tuple
 
 BATCH_SIZE = 5
-SEQ_LENGTH = 1024 * 32
+SEQ_LENGTH = 1024 
 HEAD_DIM = 128
 KV_NUM_HEADS = 2
 BLOCK_SIZE = 64
@@ -79,33 +79,38 @@ def test_backward_pass(k: torch.Tensor, v: torch.Tensor,
     ref_loss_k = torch.mean((ref_k - target_k) ** 2)
     ref_loss_k.backward()
     ref_wk_grad = w_k.grad.clone()
+    ref_dk = k.grad.clone()
     
     for param in [w_k, w_v, k, v]:
         param.grad = None
         
-    c_k, _ = compress_kv(k.detach().requires_grad_(True), 
-                        v.detach().requires_grad_(True), 
+    c_k, _ = compress_kv(k, 
+                        v, 
                         w_k, w_v, cu_seq_len, BLOCK_STRIDE, BLOCK_SIZE)
     
     c_loss_k = torch.mean((c_k - target_k) ** 2)
-    c_loss_k.backward(retain_graph=True)
+    c_loss_k.backward()
     c_wk_grad = w_k.grad.clone()
+    c_dk = k.grad.clone()
     
     torch.testing.assert_close(c_wk_grad, ref_wk_grad, rtol=2e-2, atol=2e-2)
-    print("Backward for K Passed")
+    print("Backward for dw_k Passed")
+    torch.testing.assert_close(c_dk, ref_dk, rtol=1e-2, atol=1e-2)
+    print("Backward for dk Passed")
 
     target_v = torch.randn_like(compress_kv(k, v, w_k, w_v, cu_seq_len, BLOCK_STRIDE, BLOCK_SIZE)[1])
     
     for param in [w_k, w_v, k, v]:
         param.grad = None
         
-    _, c_v = compress_kv(k.detach().requires_grad_(True), 
-                        v.detach().requires_grad_(True), 
+    _, c_v = compress_kv(k, 
+                        v, 
                         w_k, w_v, cu_seq_len, BLOCK_STRIDE, BLOCK_SIZE)
     
     c_loss_v = torch.mean((c_v - target_v) ** 2)
     c_loss_v.backward()
     c_wv_grad = w_v.grad.clone()
+    c_dv = v.grad.clone()
     
     for param in [w_k, w_v, k, v]:
         param.grad = None
@@ -114,9 +119,13 @@ def test_backward_pass(k: torch.Tensor, v: torch.Tensor,
     ref_loss_v = torch.mean((ref_v - target_v) ** 2)
     ref_loss_v.backward()
     ref_wv_grad = w_v.grad.clone()
+    ref_dv = v.grad.clone()
     
     torch.testing.assert_close(c_wv_grad, ref_wv_grad, rtol=2e-2, atol=2e-2)
-    print("Backward for V Passed")
+    print("Backward for dw_v Passed")
+    
+    torch.testing.assert_close(ref_dv, c_dv, rtol=1e-2, atol=1e-2)
+    print("Backward for dV Passed")
 
 def main():
     k, v, w_k, w_v, cu_seq_len = initialize_test_data()
