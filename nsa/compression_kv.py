@@ -109,6 +109,19 @@ def _compress_bwd_dw(
     tl.atomic_add(grad_w_ptr, accumulator.to(tl.float32))
 
 
+@triton.jit
+def _compress_bwd_dx(
+    grad_out, w, grad_x,
+    cu_input_len, cu_out_len,
+    num_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    block_stride: tl.constexpr,
+    block_size: tl.constexpr,
+    BLOCK_M: tl.constexpr
+):
+    pass    
+
+
 # k/v: [num_token, NUM_HEAD, HEAD_DIM]
 # w: [block_size*HEAD_DIM, HEAD_DIM]
 class _compress_kv(torch.autograd.Function):
@@ -168,6 +181,25 @@ class _compress_kv(torch.autograd.Function):
         
         grid = lambda meta: (cu_seq_len.numel()-1, NUM_HEAD, block_size)
         
+        # 计算k的梯度
+        _compress_bwd_dx[grid](
+            dck, w_k, dk, 
+            cu_seq_len, cu_out_len,
+            NUM_HEAD, HEAD_DIM,
+            block_stride, block_size, 
+            BLOCK_M = 32
+        )
+        
+        # 计算v的梯度
+        _compress_bwd_dx[grid](
+            dcv, w_v, dv, 
+            cu_seq_len, cu_out_len, 
+            NUM_HEAD, HEAD_DIM,
+            block_stride, block_size, 
+            BLOCK_M = 32
+        )
+        
+        # 计算w_k的梯度
         _compress_bwd_dw[grid](
             k, dck, dw_k,
             cu_seq_len, cu_out_len,
