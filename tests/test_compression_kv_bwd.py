@@ -125,7 +125,7 @@ def test_backward_pass(k: torch.Tensor, v: torch.Tensor,
     print("Backward for dw_v Passed")
     
     torch.testing.assert_close(ref_dv, c_dv, rtol=1e-2, atol=1e-2)
-    print("Backward for dV Passed")
+    print("Backward for dv Passed")
 
 def main():
     k, v, w_k, w_v, cu_seq_len = initialize_test_data()
