@@ -221,6 +221,7 @@ class _compress_kv(torch.autograd.Function):
         
         grid = lambda meta: (cu_seq_len.numel()-1, NUM_HEAD, block_size)
         
+
         _compress_bwd_dx[grid](
             dck, w_k, dk, 
             cu_seq_len, cu_out_len,
@@ -237,7 +238,6 @@ class _compress_kv(torch.autograd.Function):
             BLOCK_M = 32
         )
         
-        # 计算w_k的梯度
         _compress_bwd_dw[grid](
             k, dck, dw_k,
             cu_seq_len, cu_out_len,
