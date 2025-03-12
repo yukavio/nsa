@@ -1,7 +1,5 @@
 import torch
-from nsa.compression_kv import compress_kv, calc_compressed_len
-import triton
-
+from nsa.compression_kv import compress_kv, calc_compressed_len, _compress_bwd_dw, _compress_bwd_dx, _compress_fwd
 import triton
 
 
@@ -23,35 +21,38 @@ cu_seq_len = torch.cumsum(seq_len, dim=0).to(torch.int32).to(device)
 
 c_k, c_v =  compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
 
-def compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride):
-    kv_num_head = k.size(1) 
-    k_list = [] 
-    bs = len(cu_seq_len) - 1
+def compute_reference_kv(input_tensor: torch.Tensor, 
+                        weight: torch.Tensor,
+                        cu_seq_len: torch.Tensor,
+                        block_size: int,
+                        block_stride: int) -> torch.Tensor:
+    num_heads = input_tensor.size(1)
+    result_list = []
+    batch_size = len(cu_seq_len) - 1
     
-    for i in range(bs):
+    for i in range(batch_size):
         start_idx = int(cu_seq_len[i])
         end_idx = int(cu_seq_len[i+1])
         seq_len = end_idx - start_idx
-        single_k = k[start_idx:end_idx, :, :]  # [seq_len, H, D]
+        single_seq = input_tensor[start_idx:end_idx, :, :]
         
         num_windows = calc_compressed_len(seq_len, block_stride, block_size)
         for w in range(num_windows):
             w_start = w * block_stride
             w_end = w_start + block_size
-            k_window = single_k[w_start:w_end, :, :]  
+            window = single_seq[w_start:w_end, :, :]
             
             head_results = []
-            for h in range(kv_num_head):
-                single_head_k = k_window[:, h, :]  
-                single_head_k_flat = single_head_k.reshape(1, -1) 
-                head_k = torch.matmul(single_head_k_flat, w_k)  # [1, d]
-                head_results.append(head_k)
+            for h in range(num_heads):
+                single_head = window[:, h, :]
+                single_head_flat = single_head.reshape(1, -1)
+                head_result = torch.matmul(single_head_flat, weight)
+                head_results.append(head_result)
             
-            window_k = torch.stack(head_results, dim=1)
-            k_list.append(window_k)
+            window_result = torch.stack(head_results, dim=1)
+            result_list.append(window_result)
     
-    ref_k = torch.cat(k_list, dim=0)  # [total_windows, H, d]
-    return ref_k
+    return torch.cat(result_list, dim=0)
 
 target = torch.randn_like(c_k)
 
@@ -66,12 +67,7 @@ def calculate_flops(BATCH_SIZE, SEQ_LENGTH, HEAD_DIM, KV_NUM_HEADS, BLOCK_SIZE, 
     
     dx_flops = total_out_tokens * KV_NUM_HEADS * BLOCK_SIZE * 2 * HEAD_DIM**2
     
-    return {
-        "forward_flops": fwd_flops,
-        "backward_dw_flops": dw_flops, 
-        "backward_dx_flops": dx_flops,
-        "total_flops": fwd_flops + dw_flops + dx_flops
-    }
+    return fwd_flops, dw_flops, dx_flops
 
 # 使用测试参数计算
 params = {
@@ -83,9 +79,7 @@ params = {
     "BLOCK_STRIDE": block_stride
 }
 
-flops = calculate_flops(**params)
-print(flops)
-
+fwd_flops, dw_flops, dx_flops = calculate_flops(**params)
 
 
 
@@ -99,20 +93,19 @@ for _ in range(10):
     compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride)
     
 perf = (
-    lambda ms: total_flops * 1e-12 * 2 / (ms * 1e-3) # *2 because we calculate forward w and forward v
+    lambda ms: 2 * fwd_flops * 1e-12 / (ms * 1e-3) # *2 because we calculate forward w and forward v
 )
-ms = triton.testing.do_bench(
+ms_forward_triton = triton.testing.do_bench(
     lambda: compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
 )
 
+print(f"Triton Forward: {perf(ms_forward_triton):.2f} TFLOPs | Time: {ms_forward_triton:.2f}ms")
 
-print("compress_kv forward {} TFlops".format(perf(ms)))
-
-ms = triton.testing.do_bench(
+ms_forward_torch = triton.testing.do_bench(
     lambda: compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride)
 )
 
-print("compute_reference_kv forward {} TFlops".format(perf(ms)))
+print(f"Torch Forward: {perf(ms_forward_torch):.2f} TFLOPs | Time: {ms_forward_torch:.2f}ms")
 
 print("==========================Benchmark forward end==========================")
 
@@ -126,30 +119,87 @@ print("==========================Benchmark backward start=======================
 for _ in range(10):
     c_k, c_v = compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
     c_loss = torch.mean((c_k - target) ** 2)
-    c_loss.backward()
+    c_loss.backward(retain_graph=True)
+    w_k.grad = None
+    k.grad = None
+    w_v.grad = None
+    v.grad = None
+    
+    ref_k = compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride)
+    ref_loss = torch.mean((ref_k - target) ** 2)
+    ref_loss.backward(retain_graph=True)
     w_k.grad = None
     k.grad = None
     w_v.grad = None
     v.grad = None
 
-perf = (
-    # first * 2 is because tflops in bwd is double of fwd , seconde *2 because we calculate forward dw_k and dw_v
-    lambda ms: 2 * total_flops * 1e-12 * 2 / (ms * 1e-3) 
-)
+total_bwd_flops = 2 * (dw_flops + dx_flops)
 
-c_k, c_v = compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
-loss = torch.mean((c_k - target) ** 2)
-
-def backward_only():
+def full_backward():
+    loss = torch.mean((c_k - target) ** 2)
     loss.backward(retain_graph=True)
     w_k.grad = None
     k.grad = None
     w_v.grad = None
     v.grad = None
+    
 
+def dw_backward():
+    loss = torch.mean((c_k - target) ** 2)
+    loss.backward(inputs=[w_k, w_v], retain_graph=True)
+    w_k.grad = None
+    k.grad = None
+    w_v.grad = None
+    v.grad = None
 
-ms_backward = triton.testing.do_bench(backward_only)
-print("compress_kv backward dw {} TFlops".format(perf(ms_backward)))
+def dx_backward():
+    loss = torch.mean((c_k - target) ** 2)
+    loss.backward(inputs=[k, v], retain_graph=True)
+    w_k.grad = None
+    k.grad = None
+    w_v.grad = None
+    v.grad = None
 
+def torch_backward():
+    loss = torch.mean((ref_k - target) ** 2)
+    loss.backward(inputs=[w_k, w_v], retain_graph=True)
+    w_k.grad = None
+    k.grad = None
+    w_v.grad = None
+    v.grad = None
 
+def torch_dw_backward():
+    loss = torch.mean((ref_k - target) ** 2)
+    loss.backward(inputs=[w_k, w_v], retain_graph=True)
+    w_k.grad = None
+    k.grad = None
+    w_v.grad = None
+    v.grad = None
+    
+def torch_dx_backward():
+    loss = torch.mean((ref_k - target) ** 2)
+    loss.backward(inputs=[k, v], retain_graph=True)
+    w_k.grad = None
+    k.grad = None
+    w_v.grad = None
+    v.grad = None
+
+perf_dw = lambda ms: 2 * dw_flops * 1e-12 / (ms * 1e-3)
+perf_dx = lambda ms: 2 * dx_flops * 1e-12 / (ms * 1e-3)
+perf_total = lambda ms: total_bwd_flops * 1e-12 / (ms * 1e-3)
+
+ms_total = triton.testing.do_bench(full_backward)
+ms_dw = triton.testing.do_bench(dw_backward)
+ms_dx = triton.testing.do_bench(dx_backward)
+ms_torch = triton.testing.do_bench(torch_backward)
+ms_torch_dw = triton.testing.do_bench(torch_dw_backward)
+ms_torch_dx = triton.testing.do_bench(torch_dx_backward)
+
+print(f"Triton Backward dw only: {perf_dw(ms_dw):.2f} TFLOPs | Time: {ms_dw:.2f}ms") 
+print(f"Triton Backward dx only: {perf_dx(ms_dx):.2f} TFLOPs | Time: {ms_dx:.2f}ms")
+print(f"Triton Backward total: {perf_total(ms_total):.2f} TFLOPs | Time: {ms_total:.2f}ms")
+
+print(f"Triton Backward dw only: {perf_dw(ms_torch_dw):.2f} TFLOPs | Time: {ms_dw:.2f}ms") 
+print(f"Triton Backward dx only: {perf_dx(ms_torch_dx):.2f} TFLOPs | Time: {ms_dx:.2f}ms")
+print(f"Torch Backward total: {perf_total(ms_torch):.2f} TFLOPs | Time: {ms_torch:.2f}ms")
 print("==========================Benchmark backward end==========================")
