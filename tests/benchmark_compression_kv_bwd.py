@@ -4,7 +4,7 @@ import triton
 
 
 
-bs, seqlen, head_dim, kv_num_head = 8, 1024 * 64, 128, 4
+bs, seqlen, head_dim, kv_num_head = 4, 1024 * 64, 128, 2
 block_size, block_stride = 64, 16
 dtype = torch.bfloat16
 device = "cuda"
@@ -101,11 +101,11 @@ ms_forward_triton = triton.testing.do_bench(
 
 print(f"Triton Forward: {perf(ms_forward_triton):.2f} TFLOPs | Time: {ms_forward_triton:.2f}ms")
 
-ms_forward_torch = triton.testing.do_bench(
-    lambda: compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride)
-)
+# ms_forward_torch = triton.testing.do_bench(
+#     lambda: compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride)
+# )
 
-print(f"Torch Forward: {perf(ms_forward_torch):.2f} TFLOPs | Time: {ms_forward_torch:.2f}ms")
+# print(f"Torch Forward: {perf(ms_forward_torch):.2f} TFLOPs | Time: {ms_forward_torch:.2f}ms")
 
 print("==========================Benchmark forward end==========================")
 

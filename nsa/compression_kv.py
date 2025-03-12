@@ -240,7 +240,7 @@ class _compress_kv(torch.autograd.Function):
             cu_seq_len, cu_out_len, 
             NUM_HEAD, HEAD_DIM,
             block_stride, block_size, 
-            BLOCK_M = 64
+            # BLOCK_M = 64
         )
         
         _compress_bwd_dw[grid](
