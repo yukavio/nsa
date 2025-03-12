@@ -243,21 +243,21 @@ class _compress_kv(torch.autograd.Function):
             # BLOCK_M = 64
         )
         
-        _compress_bwd_dw[grid](
-            k, dck, dw_k,
-            cu_seq_len, cu_out_len,
-            NUM_HEAD, HEAD_DIM,
-            block_stride, block_size,
-            # BLOCK_M = 64
-        )
+        # _compress_bwd_dw[grid](
+        #     k, dck, dw_k,
+        #     cu_seq_len, cu_out_len,
+        #     NUM_HEAD, HEAD_DIM,
+        #     block_stride, block_size,
+        #     # BLOCK_M = 64
+        # )
         
-        _compress_bwd_dw[grid](
-            v, dcv, dw_v,
-            cu_seq_len, cu_out_len,
-            NUM_HEAD, HEAD_DIM,
-            block_stride, block_size,
-            # BLOCK_M = 64
-        )
+        # _compress_bwd_dw[grid](
+        #     v, dcv, dw_v,
+        #     cu_seq_len, cu_out_len,
+        #     NUM_HEAD, HEAD_DIM,
+        #     block_stride, block_size,
+        #     # BLOCK_M = 64
+        # )
         
         return dk, dv, dw_k, dw_v, None, None, None
     
