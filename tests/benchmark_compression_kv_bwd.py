@@ -4,7 +4,7 @@ import triton
 
 
 
-bs, seqlen, head_dim, kv_num_head = 16, 1024 * 64, 128, 4
+bs, seqlen, head_dim, kv_num_head = 4, 1024 * 64, 128, 2
 block_size, block_stride = 64, 16
 dtype = torch.bfloat16
 device = "cuda"
@@ -154,95 +154,95 @@ print(f"Pure _compress_bwd_dw performance: {dw_tflops/ms_dw_kernel*1e3:.2f} TFLO
 
 
 # warm up
-for _ in range(10):
-    c_k, c_v = compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
-    c_loss = torch.mean((c_k - target) ** 2)
-    c_loss.backward(retain_graph=True)
-    w_k.grad = None
-    k.grad = None
-    w_v.grad = None
-    v.grad = None
+# for _ in range(10):
+#     c_k, c_v = compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
+#     c_loss = torch.mean((c_k - target) ** 2)
+#     c_loss.backward(retain_graph=True)
+#     w_k.grad = None
+#     k.grad = None
+#     w_v.grad = None
+#     v.grad = None
     
-    ref_k = compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride)
-    ref_loss = torch.mean((ref_k - target) ** 2)
-    ref_loss.backward(retain_graph=True)
-    w_k.grad = None
-    k.grad = None
-    w_v.grad = None
-    v.grad = None
+#     ref_k = compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride)
+#     ref_loss = torch.mean((ref_k - target) ** 2)
+#     ref_loss.backward(retain_graph=True)
+#     w_k.grad = None
+#     k.grad = None
+#     w_v.grad = None
+#     v.grad = None
 
-total_bwd_flops = 2 * (dw_flops + dx_flops)
+# total_bwd_flops = 2 * (dw_flops + dx_flops)
 
-def full_backward():
-    loss = torch.mean((c_k - target) ** 2)
-    loss.backward(retain_graph=True)
-    w_k.grad = None
-    k.grad = None
-    w_v.grad = None
-    v.grad = None
+# def full_backward():
+#     loss = torch.mean((c_k - target) ** 2)
+#     loss.backward(retain_graph=True)
+#     w_k.grad = None
+#     k.grad = None
+#     w_v.grad = None
+#     v.grad = None
     
 
-def dw_backward():
-    loss = torch.mean((c_k - target) ** 2)
-    loss.backward(inputs=[w_k, w_v], retain_graph=True)
-    w_k.grad = None
-    k.grad = None
-    w_v.grad = None
-    v.grad = None
+# def dw_backward():
+#     loss = torch.mean((c_k - target) ** 2)
+#     loss.backward(inputs=[w_k, w_v], retain_graph=True)
+#     w_k.grad = None
+#     k.grad = None
+#     w_v.grad = None
+#     v.grad = None
 
-def dx_backward():
-    loss = torch.mean((c_k - target) ** 2)
-    loss.backward(inputs=[k, v], retain_graph=True)
-    w_k.grad = None
-    k.grad = None
-    w_v.grad = None
-    v.grad = None
+# def dx_backward():
+#     loss = torch.mean((c_k - target) ** 2)
+#     loss.backward(inputs=[k, v], retain_graph=True)
+#     w_k.grad = None
+#     k.grad = None
+#     w_v.grad = None
+#     v.grad = None
 
-def torch_backward():
-    loss = torch.mean((ref_k - target) ** 2)
-    loss.backward(inputs=[w_k, w_v], retain_graph=True)
-    w_k.grad = None
-    k.grad = None
-    w_v.grad = None
-    v.grad = None
+# def torch_backward():
+#     loss = torch.mean((ref_k - target) ** 2)
+#     loss.backward(inputs=[w_k, w_v], retain_graph=True)
+#     w_k.grad = None
+#     k.grad = None
+#     w_v.grad = None
+#     v.grad = None
 
-def torch_dw_backward():
-    loss = torch.mean((ref_k - target) ** 2)
-    loss.backward(inputs=[w_k, w_v], retain_graph=True)
-    w_k.grad = None
-    k.grad = None
-    w_v.grad = None
-    v.grad = None
+# def torch_dw_backward():
+#     loss = torch.mean((ref_k - target) ** 2)
+#     loss.backward(inputs=[w_k, w_v], retain_graph=True)
+#     w_k.grad = None
+#     k.grad = None
+#     w_v.grad = None
+#     v.grad = None
     
-def torch_dx_backward():
-    loss = torch.mean((ref_k - target) ** 2)
-    loss.backward(inputs=[k, v], retain_graph=True)
-    w_k.grad = None
-    k.grad = None
-    w_v.grad = None
-    v.grad = None
+# def torch_dx_backward():
+#     loss = torch.mean((ref_k - target) ** 2)
+#     loss.backward(inputs=[k, v], retain_graph=True)
+#     w_k.grad = None
+#     k.grad = None
+#     w_v.grad = None
+#     v.grad = None
 
-perf_dw = lambda ms: 2 * dw_flops * 1e-12 / (ms * 1e-3)
-perf_dx = lambda ms: 2 * dx_flops * 1e-12 / (ms * 1e-3)
-perf_total = lambda ms: total_bwd_flops * 1e-12 / (ms * 1e-3)
+# perf_dw = lambda ms: 2 * dw_flops * 1e-12 / (ms * 1e-3)
+# perf_dx = lambda ms: 2 * dx_flops * 1e-12 / (ms * 1e-3)
+# perf_total = lambda ms: total_bwd_flops * 1e-12 / (ms * 1e-3)
 
-ms_dw = triton.testing.do_bench(dw_backward)
-print(f"Triton Backward dw only: {perf_dw(ms_dw):.2f} TFLOPs | Time: {ms_dw:.2f}ms") 
+# ms_dw = triton.testing.do_bench(dw_backward)
+# print(f"Triton Backward dw only: {perf_dw(ms_dw):.2f} TFLOPs | Time: {ms_dw:.2f}ms") 
 
-ms_dx = triton.testing.do_bench(dx_backward)
-print(f"Triton Backward dx only: {perf_dx(ms_dx):.2f} TFLOPs | Time: {ms_dx:.2f}ms")
+# ms_dx = triton.testing.do_bench(dx_backward)
+# print(f"Triton Backward dx only: {perf_dx(ms_dx):.2f} TFLOPs | Time: {ms_dx:.2f}ms")
 
-ms_total = triton.testing.do_bench(full_backward)
-print(f"Triton Backward total: {perf_total(ms_total):.2f} TFLOPs | Time: {ms_total:.2f}ms")
+# ms_total = triton.testing.do_bench(full_backward)
+# print(f"Triton Backward total: {perf_total(ms_total):.2f} TFLOPs | Time: {ms_total:.2f}ms")
 
-ms_torch_dw = triton.testing.do_bench(torch_dw_backward)
-print(f"Torch Backward dw only: {perf_dw(ms_torch_dw):.2f} TFLOPs | Time: {ms_torch_dw:.2f}ms") 
+# ms_torch_dw = triton.testing.do_bench(torch_dw_backward)
+# print(f"Torch Backward dw only: {perf_dw(ms_torch_dw):.2f} TFLOPs | Time: {ms_torch_dw:.2f}ms") 
 
-ms_torch_dx = triton.testing.do_bench(torch_dx_backward)
-print(f"Torch Backward dx only: {perf_dx(ms_torch_dx):.2f} TFLOPs | Time: {ms_torch_dx:.2f}ms")
+# ms_torch_dx = triton.testing.do_bench(torch_dx_backward)
+# print(f"Torch Backward dx only: {perf_dx(ms_torch_dx):.2f} TFLOPs | Time: {ms_torch_dx:.2f}ms")
 
-ms_torch = triton.testing.do_bench(torch_backward)
-print(f"Torch Backward total: {perf_total(ms_torch):.2f} TFLOPs | Time: {ms_torch:.2f}ms")
+# ms_torch = triton.testing.do_bench(torch_backward)
+# print(f"Torch Backward total: {perf_total(ms_torch):.2f} TFLOPs | Time: {ms_torch:.2f}ms")
 
 
 print("==========================Benchmark backward end==========================")
