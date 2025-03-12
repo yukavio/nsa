@@ -199,7 +199,7 @@ print(f"Triton Backward dw only: {perf_dw(ms_dw):.2f} TFLOPs | Time: {ms_dw:.2f}
 print(f"Triton Backward dx only: {perf_dx(ms_dx):.2f} TFLOPs | Time: {ms_dx:.2f}ms")
 print(f"Triton Backward total: {perf_total(ms_total):.2f} TFLOPs | Time: {ms_total:.2f}ms")
 
-print(f"Triton Backward dw only: {perf_dw(ms_torch_dw):.2f} TFLOPs | Time: {ms_dw:.2f}ms") 
-print(f"Triton Backward dx only: {perf_dx(ms_torch_dx):.2f} TFLOPs | Time: {ms_dx:.2f}ms")
+print(f"Triton Backward dw only: {perf_dw(ms_torch_dw):.2f} TFLOPs | Time: {ms_torch_dw:.2f}ms") 
+print(f"Triton Backward dx only: {perf_dx(ms_torch_dx):.2f} TFLOPs | Time: {ms_torch_dx:.2f}ms")
 print(f"Torch Backward total: {perf_total(ms_torch):.2f} TFLOPs | Time: {ms_torch:.2f}ms")
 print("==========================Benchmark backward end==========================")
