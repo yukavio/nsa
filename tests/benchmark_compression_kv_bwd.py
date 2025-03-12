@@ -4,7 +4,7 @@ import triton
 
 
 
-bs, seqlen, head_dim, kv_num_head = 4, 1024 * 64, 128, 2
+bs, seqlen, head_dim, kv_num_head = 4, 1024 * 64, 128, 4
 block_size, block_stride = 64, 16
 dtype = torch.bfloat16
 device = "cuda"
@@ -54,13 +54,41 @@ def compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride):
 target = torch.randn_like(c_k)
 
 # test tflops 
-def calculate_tflops(bs, seqlen, block_size, block_stride, kv_num_head, head_dim):
-    num_windows_per_seq = ((seqlen - block_size) // block_stride)
-    total_matmuls = bs * num_windows_per_seq * kv_num_head
-    flops_per_matmul = 2 * block_size * (head_dim ** 2)
-    total_flops = total_matmuls * flops_per_matmul
-    return total_flops
-total_flops = calculate_tflops(bs, seqlen, block_size, block_stride, kv_num_head, head_dim)
+def calculate_flops(BATCH_SIZE, SEQ_LENGTH, HEAD_DIM, KV_NUM_HEADS, BLOCK_SIZE, BLOCK_STRIDE):
+    compressed_len = (SEQ_LENGTH - BLOCK_SIZE) // BLOCK_STRIDE
+    total_out_tokens = BATCH_SIZE * compressed_len
+    
+    fwd_flops = total_out_tokens * KV_NUM_HEADS * BLOCK_SIZE * 2 * HEAD_DIM**2
+    
+    dw_flops = total_out_tokens * KV_NUM_HEADS * BLOCK_SIZE * 2 * HEAD_DIM**2
+    
+    dx_flops = total_out_tokens * KV_NUM_HEADS * BLOCK_SIZE * 2 * HEAD_DIM**2
+    
+    return {
+        "forward_flops": fwd_flops,
+        "backward_dw_flops": dw_flops, 
+        "backward_dx_flops": dx_flops,
+        "total_flops": fwd_flops + dw_flops + dx_flops
+    }
+
+# 使用测试参数计算
+params = {
+    "BATCH_SIZE": bs,
+    "SEQ_LENGTH": seqlen,
+    "HEAD_DIM": head_dim,
+    "KV_NUM_HEADS": kv_num_head,
+    "BLOCK_SIZE": block_size,
+    "BLOCK_STRIDE": block_stride
+}
+
+flops = calculate_flops(**params)
+print(flops)
+
+
+
+
+
+
 
 # warm up
 print("==========================Benchmark forward start==========================")
