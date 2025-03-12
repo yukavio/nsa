@@ -52,10 +52,10 @@ def _compress_fwd(x, w, out, cu_input_len, cu_out_len, num_heads: tl.constexpr,
 
 
 
-# @triton.autotune(
-#     configs=get_autotune_config(),
-#     key=['num_heads', 'head_dim', 'block_stride', 'block_size'],
-# )
+@triton.autotune(
+    configs=get_autotune_config(),
+    key=['num_heads', 'head_dim', 'block_stride', 'block_size'],
+)
 @triton.jit
 def _compress_bwd_dw(
     x, grad_out, grad_w,
@@ -107,59 +107,13 @@ def _compress_bwd_dw(
     off_n = tl.arange(0, head_dim)[None, :]
     grad_w_ptr = grad_w_ptr + off_m * head_dim + off_n
     tl.atomic_add(grad_w_ptr, accumulator.to(tl.float32))
-
-
-@triton.jit
-def _compress_bwd_dx(
-    grad_out, w, grad_x,
-    cu_input_len, cu_out_len,
-    num_heads: tl.constexpr,
-    head_dim: tl.constexpr,
-    block_stride: tl.constexpr,
-    block_size: tl.constexpr,
-    BLOCK_M: tl.constexpr
-):
-    bs_id, head_id, start_id = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    seq_offset = tl.load(cu_input_len + bs_id)
-    seq_upper = tl.load(cu_input_len + bs_id + 1)
-    out_offset = tl.load(cu_out_len + bs_id)
-    out_upper = tl.load(cu_out_len + bs_id + 1)
-    n_ctx = seq_upper - seq_offset
-    out_len = out_upper - out_offset
-
-
-    grad_out_ptr = grad_out + out_offset * num_heads * head_dim + head_id * head_dim
-    grad_x_ptr = grad_x + seq_offset * num_heads * head_dim + head_id * head_dim
-    w_ptr = w
-    
-    for task_id in range(start_id, (out_len + BLOCK_M - 1) // BLOCK_M, tl.num_programs(2)):
-        off_m = tl.arange(0, BLOCK_M) + task_id * BLOCK_M
-        off_n = tl.arange(0, head_dim)
-        off_k = tl.arange(0, head_dim)
-        
-        grad_out_data = tl.load(
-            grad_out_ptr + off_m[:, None] * num_heads * head_dim + off_n[None, :],
-            mask=off_m[:, None] < out_len,
-            other=0.0
-        )
-        
-        for j in range(block_size):
-            w_ptr_j = w_ptr + j * head_dim * head_dim
-            w_data = tl.load(w_ptr_j + off_k[:, None] * head_dim + off_n[None, :])
-            
-            input_idx = off_m * block_stride + j
-            valid_input = input_idx < n_ctx
-            
-            grad_x_ptr_j = grad_x_ptr + (input_idx * num_heads * head_dim)[:, None] + off_k[None, :]
-            
-            accumulator_j = tl.dot(grad_out_data, w_data.T)
-            accumulator_j = accumulator_j.to(tl.float32)
-            
-            tl.atomic_add(grad_x_ptr_j, accumulator_j, mask=valid_input[:, None])
         
         
         
-        
+@triton.autotune(
+    configs=get_autotune_config(),
+    key=['num_heads', 'head_dim', 'block_stride', 'block_size'],
+)        
 @triton.jit
 def _compress_bwd_dx(
     grad_out, w, grad_x,
@@ -278,7 +232,7 @@ class _compress_kv(torch.autograd.Function):
             cu_seq_len, cu_out_len,
             NUM_HEAD, HEAD_DIM,
             block_stride, block_size, 
-            BLOCK_M = 32
+            # BLOCK_M = 64
         )
         
         _compress_bwd_dx[grid](
@@ -286,7 +240,7 @@ class _compress_kv(torch.autograd.Function):
             cu_seq_len, cu_out_len, 
             NUM_HEAD, HEAD_DIM,
             block_stride, block_size, 
-            BLOCK_M = 32
+            BLOCK_M = 64
         )
         
         _compress_bwd_dw[grid](
@@ -294,7 +248,7 @@ class _compress_kv(torch.autograd.Function):
             cu_seq_len, cu_out_len,
             NUM_HEAD, HEAD_DIM,
             block_stride, block_size,
-            BLOCK_M = 32 # NOTE: There is bug if we set the parameter to be autotune by @triton.autotune
+            # BLOCK_M = 64
         )
         
         _compress_bwd_dw[grid](
@@ -302,7 +256,7 @@ class _compress_kv(torch.autograd.Function):
             cu_seq_len, cu_out_len,
             NUM_HEAD, HEAD_DIM,
             block_stride, block_size,
-            BLOCK_M = 32 # NOTE: Same as line 177
+            # BLOCK_M = 64
         )
         
         return dk, dv, dw_k, dw_v, None, None, None
