@@ -197,13 +197,13 @@ print(f"Triton Backward dx only: {perf_dx(ms_dx):.2f} TFLOPs | Time: {ms_dx:.2f}
 ms_total = triton.testing.do_bench(full_backward)
 print(f"Triton Backward total: {perf_total(ms_total):.2f} TFLOPs | Time: {ms_total:.2f}ms")
 
-ms_torch_dw = triton.testing.do_bench(torch_dw_backward)
-print(f"Triton Backward dw only: {perf_dw(ms_torch_dw):.2f} TFLOPs | Time: {ms_torch_dw:.2f}ms") 
+# ms_torch_dw = triton.testing.do_bench(torch_dw_backward)
+# print(f"Torch Backward dw only: {perf_dw(ms_torch_dw):.2f} TFLOPs | Time: {ms_torch_dw:.2f}ms") 
 
-ms_torch_dx = triton.testing.do_bench(torch_dx_backward)
-print(f"Triton Backward dx only: {perf_dx(ms_torch_dx):.2f} TFLOPs | Time: {ms_torch_dx:.2f}ms")
+# ms_torch_dx = triton.testing.do_bench(torch_dx_backward)
+# print(f"Torch Backward dx only: {perf_dx(ms_torch_dx):.2f} TFLOPs | Time: {ms_torch_dx:.2f}ms")
 
-ms_torch = triton.testing.do_bench(torch_backward)
-print(f"Torch Backward total: {perf_total(ms_torch):.2f} TFLOPs | Time: {ms_torch:.2f}ms")
+# ms_torch = triton.testing.do_bench(torch_backward)
+# print(f"Torch Backward total: {perf_total(ms_torch):.2f} TFLOPs | Time: {ms_torch:.2f}ms")
 
 print("==========================Benchmark backward end==========================")
