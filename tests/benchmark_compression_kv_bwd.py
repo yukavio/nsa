@@ -117,6 +117,7 @@ print("==========================Benchmark forward end==========================
 print("==========================Benchmark backward start==========================")
 # 单独测试_compress_bwd_dw的性能
 def dw_kernel():
+    pre = 0
     cu_seq_len_cpu = cu_seq_len.tolist()
     cu_out_len = [0]
     for x in cu_seq_len_cpu[1:]:
@@ -150,6 +151,42 @@ dw_tflops = dw_flops * 1e-12  # 转换为TFLOPs
 ms_dw_kernel = triton.testing.do_bench(lambda: dw_kernel())
 
 print(f"Pure _compress_bwd_dw performance: {dw_tflops/ms_dw_kernel*1e3:.2f} TFLOPs | Time: {ms_dw_kernel:.2f}ms")
+
+
+def dx_kernel():
+    pre = 0
+    cu_seq_len_cpu = cu_seq_len.tolist()
+    cu_out_len = [0]
+    for x in cu_seq_len_cpu[1:]:
+        cu_out_len.append(cu_out_len[-1] + calc_compressed_len(x-pre, block_stride, block_size))
+        pre = x
+    cu_out_len = torch.tensor(cu_out_len, device=cu_seq_len.device, dtype=torch.int32)
+    NUM_HEAD, HEAD_DIM = k.shape[1:]
+    grid = lambda args: (cu_seq_len.numel()-1, NUM_HEAD, 128)
+    _compress_bwd_dx[grid](
+        c_k.grad, w_k, k.grad,
+        cu_seq_len, cu_out_len,
+        kv_num_head, head_dim,
+        block_stride, block_size
+    )
+    torch.cuda.synchronize()
+
+# 初始化梯度
+c_k.grad = torch.randn_like(c_k)
+k.grad = torch.zeros_like(k)
+
+# 预热
+for _ in range(10):
+    dx_kernel()
+    k.grad.zero_()
+
+# 计算理论FLOPs（只计算dx部分）
+dx_tflops = dx_flops * 1e-12  # 转换为TFLOPs
+
+# 运行基准测试
+ms_dx_kernel = triton.testing.do_bench(lambda: dx_kernel())
+
+print(f"Pure _compress_bwd_dx performance: {dx_tflops/ms_dx_kernel*1e3:.2f} TFLOPs | Time: {ms_dx_kernel:.2f}ms")
 
 
 
