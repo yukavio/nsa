@@ -160,6 +160,57 @@ def _compress_bwd_dx(
         
         
         
+@triton.jit
+def _compress_bwd_dx(
+    grad_out, w, grad_x,
+    cu_input_len, cu_out_len,
+    num_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    block_stride: tl.constexpr,
+    block_size: tl.constexpr,
+    BLOCK_M: tl.constexpr
+):
+    bs_id, head_id, start_id = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    seq_offset = tl.load(cu_input_len + bs_id)
+    seq_upper = tl.load(cu_input_len + bs_id + 1)
+    out_offset = tl.load(cu_out_len + bs_id)
+    out_upper = tl.load(cu_out_len + bs_id + 1)
+    n_ctx = seq_upper - seq_offset
+    out_len = out_upper - out_offset
+
+
+    grad_out_ptr = grad_out + out_offset * num_heads * head_dim + head_id * head_dim
+    grad_x_ptr = grad_x + seq_offset * num_heads * head_dim + head_id * head_dim
+    w_ptr = w
+    
+    for task_id in range(start_id, (out_len + BLOCK_M - 1) // BLOCK_M, tl.num_programs(2)):
+        off_m = tl.arange(0, BLOCK_M) + task_id * BLOCK_M
+        off_n = tl.arange(0, head_dim)
+        off_k = tl.arange(0, head_dim)
+        
+        grad_out_data = tl.load(
+            grad_out_ptr + off_m[:, None] * num_heads * head_dim + off_n[None, :],
+            mask=off_m[:, None] < out_len,
+            other=0.0
+        )
+        
+        for j in range(block_size):
+            w_ptr_j = w_ptr + j * head_dim * head_dim
+            w_data = tl.load(w_ptr_j + off_k[:, None] * head_dim + off_n[None, :])
+            
+            input_idx = off_m * block_stride + j
+            valid_input = input_idx < n_ctx
+            
+            grad_x_ptr_j = grad_x_ptr + (input_idx * num_heads * head_dim)[:, None] + off_k[None, :]
+            
+            accumulator_j = tl.dot(grad_out_data, w_data.T)
+            accumulator_j = accumulator_j.to(tl.float32)
+            
+            tl.atomic_add(grad_x_ptr_j, accumulator_j, mask=valid_input[:, None])
+        
+        
+        
+        
 # k/v: [num_token, NUM_HEAD, HEAD_DIM]
 # w: [block_size*HEAD_DIM, HEAD_DIM]
 class _compress_kv(torch.autograd.Function):
@@ -221,6 +272,7 @@ class _compress_kv(torch.autograd.Function):
         
         grid = lambda meta: (cu_seq_len.numel()-1, NUM_HEAD, block_size)
         
+
         _compress_bwd_dx[grid](
             dck, w_k, dk, 
             cu_seq_len, cu_out_len,
@@ -237,7 +289,6 @@ class _compress_kv(torch.autograd.Function):
             BLOCK_M = 32
         )
         
-        # 计算w_k的梯度
         _compress_bwd_dw[grid](
             k, dck, dw_k,
             cu_seq_len, cu_out_len,
