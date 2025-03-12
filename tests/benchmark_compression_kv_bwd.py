@@ -1,8 +1,6 @@
 import torch
-from nsa.compression_kv import compress_kv, calc_compressed_len, _compress_bwd_dw, _compress_bwd_dx, _compress_fwd
+from nsa.compression_kv import compress_kv, calc_compressed_len
 import triton
-
-
 
 bs, seqlen, head_dim, kv_num_head = 4, 1024 * 64, 128, 2
 block_size, block_stride = 64, 16
@@ -58,15 +56,19 @@ target = torch.randn_like(c_k)
 
 # test tflops 
 def calculate_flops(BATCH_SIZE, SEQ_LENGTH, HEAD_DIM, KV_NUM_HEADS, BLOCK_SIZE, BLOCK_STRIDE):
-    compressed_len = (SEQ_LENGTH - BLOCK_SIZE) // BLOCK_STRIDE
+    compressed_len = max(0, (SEQ_LENGTH - BLOCK_SIZE + BLOCK_STRIDE) // BLOCK_STRIDE)
     total_out_tokens = BATCH_SIZE * compressed_len
     
-    fwd_flops = total_out_tokens * KV_NUM_HEADS * (2 * BLOCK_SIZE * HEAD_DIM * HEAD_DIM)
-    dw_flops = total_out_tokens * KV_NUM_HEADS * (2 * BLOCK_SIZE * HEAD_DIM * HEAD_DIM)
-    dx_flops = total_out_tokens * KV_NUM_HEADS * (2 * BLOCK_SIZE * HEAD_DIM * HEAD_DIM)
+    single_fwd_flops = total_out_tokens * KV_NUM_HEADS * (2 * BLOCK_SIZE * HEAD_DIM * HEAD_DIM)
+    fwd_flops = 2 * single_fwd_flops
+    
+    single_dw_flops = total_out_tokens * KV_NUM_HEADS * (2 * BLOCK_SIZE * HEAD_DIM * HEAD_DIM)
+    single_dx_flops = total_out_tokens * KV_NUM_HEADS * (2 * BLOCK_SIZE * HEAD_DIM * HEAD_DIM)
+    
+    dw_flops = 2 * single_dw_flops 
+    dx_flops = 2 * single_dx_flops 
     
     return fwd_flops, dw_flops, dx_flops
-
 
 # 使用测试参数计算
 params = {
@@ -80,20 +82,14 @@ params = {
 
 fwd_flops, dw_flops, dx_flops = calculate_flops(**params)
 
-
-
-
-
-
 # warm up
 print("==========================Benchmark forward start==========================")
 for _ in range(10):
     compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
     compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride)
     
-perf = (
-    lambda ms: 2 * fwd_flops * 1e-12 / (ms * 1e-3) # *2 because we calculate forward w and forward v
-)
+perf = lambda ms: fwd_flops * 1e-12 / (ms * 1e-3)
+
 ms_forward_triton = triton.testing.do_bench(
     lambda: compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
 )
@@ -107,11 +103,6 @@ ms_forward_torch = triton.testing.do_bench(
 print(f"Torch Forward: {perf(ms_forward_torch):.2f} TFLOPs | Time: {ms_forward_torch:.2f}ms")
 
 print("==========================Benchmark forward end==========================")
-
-
-
-
-
 
 print("==========================Benchmark backward start==========================")
 # warm up
@@ -183,9 +174,11 @@ def torch_dx_backward():
     w_v.grad = None
     v.grad = None
 
-perf_dw = lambda ms: 2 * dw_flops * 1e-12 / (ms * 1e-3)
-perf_dx = lambda ms: 2 * dx_flops * 1e-12 / (ms * 1e-3)
-perf_total = lambda ms: total_bwd_flops * 1e-12 / (ms * 1e-3)
+
+perf_dw = lambda ms: dw_flops * 1e-12 / (ms * 1e-3)
+perf_dx = lambda ms: dx_flops * 1e-12 / (ms * 1e-3)
+perf_total = lambda ms: (dw_flops + dx_flops) * 1e-12 / (ms * 1e-3)
+
 
 ms_dw = triton.testing.do_bench(dw_backward)
 print(f"Triton Backward dw only: {perf_dw(ms_dw):.2f} TFLOPs | Time: {ms_dw:.2f}ms") 
@@ -204,6 +197,5 @@ print(f"Torch Backward dx only: {perf_dx(ms_torch_dx):.2f} TFLOPs | Time: {ms_to
 
 ms_torch = triton.testing.do_bench(torch_backward)
 print(f"Torch Backward total: {perf_total(ms_torch):.2f} TFLOPs | Time: {ms_torch:.2f}ms")
-
 
 print("==========================Benchmark backward end==========================")
