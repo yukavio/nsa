@@ -2,7 +2,7 @@ import torch
 from nsa.compression_kv import compress_kv, calc_compressed_len
 import triton
 
-bs, seqlen, head_dim, kv_num_head = 4, 1024 * 64, 128, 2
+bs, seqlen, head_dim, kv_num_head = 16, 1024 * 64, 128, 4
 block_size, block_stride = 64, 16
 dtype = torch.bfloat16
 device = "cuda"
