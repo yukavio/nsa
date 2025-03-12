@@ -4,7 +4,7 @@ import triton
 
 
 
-bs, seqlen, head_dim, kv_num_head = 4, 1024 * 64, 128, 2
+bs, seqlen, head_dim, kv_num_head = 16, 1024 * 64, 128, 4
 block_size, block_stride = 64, 16
 dtype = torch.bfloat16
 device = "cuda"
@@ -101,11 +101,11 @@ ms_forward_triton = triton.testing.do_bench(
 
 print(f"Triton Forward: {perf(ms_forward_triton):.2f} TFLOPs | Time: {ms_forward_triton:.2f}ms")
 
-# ms_forward_torch = triton.testing.do_bench(
-#     lambda: compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride)
-# )
+ms_forward_torch = triton.testing.do_bench(
+    lambda: compute_reference_kv(k, w_k, cu_seq_len, block_size, block_stride)
+)
 
-# print(f"Torch Forward: {perf(ms_forward_torch):.2f} TFLOPs | Time: {ms_forward_torch:.2f}ms")
+print(f"Torch Forward: {perf(ms_forward_torch):.2f} TFLOPs | Time: {ms_forward_torch:.2f}ms")
 
 print("==========================Benchmark forward end==========================")
 
@@ -115,6 +115,44 @@ print("==========================Benchmark forward end==========================
 
 
 print("==========================Benchmark backward start==========================")
+# 单独测试_compress_bwd_dw的性能
+def dw_kernel():
+    cu_seq_len_cpu = cu_seq_len.tolist()
+    cu_out_len = [0]
+    for x in cu_seq_len_cpu[1:]:
+        cu_out_len.append(cu_out_len[-1] + calc_compressed_len(x-pre, block_stride, block_size))
+        pre = x
+    cu_out_len = torch.tensor(cu_out_len, device=cu_seq_len.device, dtype=torch.int32)
+    NUM_HEAD, HEAD_DIM = k.shape[1:]
+    grid = lambda args: (cu_seq_len.numel()-1, NUM_HEAD, 128)
+    # 直接调用triton kernel而不是通过autograd
+    _compress_bwd_dw[grid](
+        k, c_k.grad, w_k.grad,
+        cu_seq_len, cu_out_len,
+        kv_num_head, head_dim,
+        block_stride, block_size
+    )
+    torch.cuda.synchronize()
+
+# 初始化梯度
+c_k.grad = torch.randn_like(c_k)
+w_k.grad = torch.zeros_like(w_k)
+
+# 预热
+for _ in range(10):
+    dw_kernel()
+    w_k.grad.zero_()
+
+# 计算理论FLOPs（只计算dw部分）
+dw_tflops = dw_flops * 1e-12  # 转换为TFLOPs
+
+# 运行基准测试
+ms_dw_kernel = triton.testing.do_bench(lambda: dw_kernel())
+
+print(f"Pure _compress_bwd_dw performance: {dw_tflops/ms_dw_kernel*1e3:.2f} TFLOPs | Time: {ms_dw_kernel:.2f}ms")
+
+
+
 # warm up
 for _ in range(10):
     c_k, c_v = compress_kv(k, v, w_k, w_v, cu_seq_len, block_stride, block_size)
@@ -197,13 +235,14 @@ print(f"Triton Backward dx only: {perf_dx(ms_dx):.2f} TFLOPs | Time: {ms_dx:.2f}
 ms_total = triton.testing.do_bench(full_backward)
 print(f"Triton Backward total: {perf_total(ms_total):.2f} TFLOPs | Time: {ms_total:.2f}ms")
 
-# ms_torch_dw = triton.testing.do_bench(torch_dw_backward)
-# print(f"Torch Backward dw only: {perf_dw(ms_torch_dw):.2f} TFLOPs | Time: {ms_torch_dw:.2f}ms") 
+ms_torch_dw = triton.testing.do_bench(torch_dw_backward)
+print(f"Torch Backward dw only: {perf_dw(ms_torch_dw):.2f} TFLOPs | Time: {ms_torch_dw:.2f}ms") 
 
-# ms_torch_dx = triton.testing.do_bench(torch_dx_backward)
-# print(f"Torch Backward dx only: {perf_dx(ms_torch_dx):.2f} TFLOPs | Time: {ms_torch_dx:.2f}ms")
+ms_torch_dx = triton.testing.do_bench(torch_dx_backward)
+print(f"Torch Backward dx only: {perf_dx(ms_torch_dx):.2f} TFLOPs | Time: {ms_torch_dx:.2f}ms")
 
-# ms_torch = triton.testing.do_bench(torch_backward)
-# print(f"Torch Backward total: {perf_total(ms_torch):.2f} TFLOPs | Time: {ms_torch:.2f}ms")
+ms_torch = triton.testing.do_bench(torch_backward)
+print(f"Torch Backward total: {perf_total(ms_torch):.2f} TFLOPs | Time: {ms_torch:.2f}ms")
+
 
 print("==========================Benchmark backward end==========================")
