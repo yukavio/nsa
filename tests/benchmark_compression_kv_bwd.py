@@ -132,7 +132,6 @@ def dw_backward():
         cu_seq_len, cu_out_len,
         NUM_HEAD, HEAD_DIM,
         block_stride, block_size,
-        # BLOCK_M = 64
     )
     
 
@@ -143,7 +142,6 @@ def dx_backward():
         cu_seq_len, cu_out_len,
         NUM_HEAD, HEAD_DIM,
         block_stride, block_size, 
-        # BLOCK_M = 16
     )
     
 def full_backward():
