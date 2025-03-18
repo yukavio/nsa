@@ -1,6 +1,9 @@
+import math
 import torch
+import torch.nn as nn
 import triton
 import triton.language as tl
+from torch.nn import init
 
 def calc_compressed_len(x, stride, size):
     return  (x - size) // stride
@@ -210,11 +213,11 @@ class _compress_kv(torch.autograd.Function):
             block_stride_tensor, block_size_tensor
         )
         
-        return compressed_k, compressed_v
+        return compressed_k, compressed_v, cu_out_len
     
 
     @staticmethod
-    def backward(ctx, dck, dcv):
+    def backward(ctx, dck, dcv, _):
         k, v, w_k, w_v, cu_seq_len, cu_out_len, num_head_tensor, head_dim_tensor, block_stride_tensor, block_size_tensor = ctx.saved_tensors
         
         NUM_HEAD = num_head_tensor.item()
@@ -262,5 +265,25 @@ class _compress_kv(torch.autograd.Function):
         return dk, dv, dw_k, dw_v, None, None, None
     
 
-
 compress_kv = _compress_kv.apply
+
+
+class KVCompressor(nn.Module):
+    def __init__(self, block_stride, block_size, head_dim, device, dtype):
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.block_stride = block_stride
+        self.block_size = block_size
+        self.k_weight = nn.Parameter(torch.empty(block_size*head_dim, head_dim, **factory_kwargs))
+        self.v_weight = nn.Parameter(torch.empty(block_size*head_dim, head_dim, **factory_kwargs))
+        self.reset_parameters()
+
+    def forward(self, k, v, cu_seq_len):
+        compress_k, compress_v, cu_out_len = compress_kv(k, v, self.k_weight,
+            self.v_weight, cu_seq_len, self.block_stride, self.block_size)
+        return compress_k, compress_v, cu_out_len
+    
+    def reset_parameters(self) -> None:
+        init.kaiming_uniform_(self.k_weight, a=math.sqrt(5))
+        init.kaiming_uniform_(self.v_weight, a=math.sqrt(5))
+            

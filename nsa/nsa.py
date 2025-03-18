@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_v2_func
+from nsa.compression_kv import KVCompressor
+from nsa.torch_attention import attention_ref as attn_func
 
 try:
     from flash_attn_interface import flash_attn_varlen_func as flash_attn_v3_func
@@ -9,15 +11,33 @@ except:
 
 
 class CompressionAttn(nn.Module):
-    def __init__(self, compression_stride: int, compression_block: int, flash_attn_func):
+    def __init__(self, compression_stride: int, compression_block: int, head_dim: int, flash_attn_func, device, dtype):
         super().__init__()
         self.compression_stride = compression_stride
         self.compression_block = compression_block
         self.flash_attn_func = flash_attn_func
+        self.compressor = KVCompressor(compression_stride, compression_block, head_dim, device, dtype)
         
 
     def forward(self, **kwargs):
-        pass
+        k, v, cu_kv_len = self.compressor(kwargs['k'], kwargs['v'], kwargs['cu_seqlens_k'])
+        q = kwargs['q']
+        # kwargs['k'] = ck
+        # kwargs['v'] = cv
+        # max_kv_len = torch.max(cu_kv_len)
+        # kwargs['cu_seqlens_k'] = cu_kv_len
+        # kwargs['max_seq_len_k'] = max_kv_len
+        
+        bs = cu_kv_len.numel()-1
+        num_q_head, head_qk_dim = q.shape[1:]
+        num_token, num_kv_head, head_v_dim = v.shape
+        seq_len = num_token // bs
+        q = q.reshape(bs, -1, num_q_head, head_qk_dim)
+        k = k.reshape(bs, seq_len, num_kv_head, head_qk_dim)
+        v = v.reshape(bs, seq_len, num_kv_head, head_v_dim)
+        attn_out, attn_prob = attn_func(q, k, v, self.compression_stride, self.compression_block, 
+                                        causal=kwargs['causal'], scale=kwargs['softmax_scale'])
+        return attn_out, attn_prob
     
 
 class SelectionAttn(nn.Module):
@@ -28,10 +48,9 @@ class SelectionAttn(nn.Module):
         self.flash_attn_func = flash_attn_func
 
     def forward(self, **kwargs):
-        pass
-    
-
-
+        attn_score = kwargs.pop('attn')
+        
+        
 
 class NSAAttention(nn.Module):
     def __init__(
@@ -47,6 +66,8 @@ class NSAAttention(nn.Module):
         selection_block=64,
         selected_block_count=16,
         sliding_window=512,
+        device=None,
+        dtype=None,
     ):
         super().__init__()
         self._is_v3 = (
@@ -65,7 +86,7 @@ class NSAAttention(nn.Module):
         self.drop_p = attention_dropout
         self.deterministic = deterministic
         self.gating == nn.Linear(embedding_size, 3)
-        self.compression_attn = CompressionAttn(compression_stride, comression_block, self.flash_attn_func)
+        self.compression_attn = CompressionAttn(compression_stride, comression_block, head_dim, self.flash_attn_func, device, dtype)
         self.selection_attn = SelectionAttn(selection_block, selected_block_count, self.flash_attn_func)
         self.sliding_window = sliding_window
         
@@ -101,6 +122,43 @@ class NSAAttention(nn.Module):
         causal = self.causal if causal is None else causal
         cu_seqlens_k = cu_seqlens if cu_seqlens_k is None else cu_seqlens_k
         max_seqlen_k = max_seqlen if max_seqlen_k is None else max_seqlen_k
+
+        # compression attn
+        flash_kwargs = {
+            "q": q,
+            "k": k,
+            "v": v,
+            "cu_seqlens_q": cu_seqlens,
+            "cu_seqlens_k": cu_seqlens_k,
+            "max_seqlen_q": max_seqlen,
+            "max_seqlen_k": max_seqlen_k,
+            "softmax_scale": self.softmax_scale,
+            "causal": causal,
+            "deterministic": self.deterministic,
+        }
+        if not self._is_v3:
+            flash_kwargs["dropout_p"] = self.drop_p
+        compress_attn_out, attn_score = self.compression_attn(**flash_kwargs)
+
+        # selection attn
+        flash_kwargs = {
+            "q": q,
+            "k": k,
+            "v": v,
+            "cu_seqlens_q": cu_seqlens,
+            "cu_seqlens_k": cu_seqlens_k,
+            "max_seqlen_q": max_seqlen,
+            "max_seqlen_k": max_seqlen_k,
+            "softmax_scale": self.softmax_scale,
+            "causal": causal,
+            "deterministic": self.deterministic,
+            'attn_score': attn_score,
+        }
+        if not self._is_v3:
+            flash_kwargs["dropout_p"] = self.drop_p
+        selection_attn_out = self.selection_attn(**flash_kwargs)
+
+        # local attn
         flash_kwargs = {
             "q": q,
             "k": k,
@@ -114,17 +172,8 @@ class NSAAttention(nn.Module):
             "window_size": (self.sliding_window, 0),
             "deterministic": self.deterministic,
         }
-        if not self._is_v3:
-            flash_kwargs["dropout_p"] = self.drop_p 
-        
-        # compression attn
-        self.compression_attn(**flash_kwargs)
-
-        # selection attn
-        self.selection_attn(**flash_kwargs)
-
-        # local attn
-        output = self.flash_attn_func(**flash_kwargs)[0] if self._is_v3 else output
+        output = self.flash_attn_func(**flash_kwargs)
+        output = output[0] if self._is_v3 else output
         
         
         # v3 always returns softmax_sce
