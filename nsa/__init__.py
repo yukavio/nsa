@@ -1,1 +1,1 @@
-from .naive_selection_attn_fwd import attention as selection_attention
+from .selection_attn import parallel_nsa as selection_attention

@@ -3,6 +3,7 @@ from torch import nn
 from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_v2_func
 from nsa.compression_kv import KVCompressor
 from nsa.torch_attention import attention_ref as attn_func
+from nsa import selection_attention
 
 try:
     from flash_attn_interface import flash_attn_varlen_func as flash_attn_v3_func
@@ -11,11 +12,10 @@ except:
 
 
 class CompressionAttn(nn.Module):
-    def __init__(self, compression_stride: int, compression_block: int, head_dim: int, flash_attn_func, device, dtype):
+    def __init__(self, compression_stride: int, compression_block: int, head_dim: int, device, dtype):
         super().__init__()
         self.compression_stride = compression_stride
         self.compression_block = compression_block
-        self.flash_attn_func = flash_attn_func
         self.compressor = KVCompressor(compression_stride, compression_block, head_dim, device, dtype)
         
 
@@ -41,15 +41,33 @@ class CompressionAttn(nn.Module):
     
 
 class SelectionAttn(nn.Module):
-    def __init__(self, selection_block: int, selected_block_count: int, flash_attn_func):
+    def __init__(self, selection_block: int, selected_block_count: int, 
+                 compression_stride: int, compression_block: int):
         super().__init__()
         self.selection_block = selection_block
         self.selection_block_count = selected_block_count
-        self.flash_attn_func = flash_attn_func
+        
+        kernel_size = selection_block // compression_stride + 1
+        padding = compression_block // compression_stride - 2
+        stride = selection_block // compression_stride
+        self.pooler = torch.nn.AvgPool1d(kernel_size, stride, padding, True)
 
     def forward(self, **kwargs):
         attn_score = kwargs.pop('attn')
+        q = kwargs['q']
+        k = kwargs['k']
+        v = kwargs['v']
         
+        bs, seq_len = attn_score.shape[:2]
+        num_token, num_head, head_dim = q.shape
+        num_kv_head = k.shape[1]
+        
+        score = attn_score.reshape(bs, num_kv_head, -1, *attn_score.shape[-2:]).sum(2)
+        score = score.reshape(-1, *score.shape[2:])
+        score = self.pooler(score).reshape(bs, seq_len, score.shape[-2:]) # -> B, H, T1, T2
+        
+        indices = torch.topk(score, self.selection_block_count, dim=3).indices
+        return bs
         
 
 class NSAAttention(nn.Module):
@@ -62,7 +80,7 @@ class NSAAttention(nn.Module):
         attention_dropout=0.0,
         deterministic=False,
         compression_stride=16, # for nsa
-        comression_block=32,
+        compression_block=32,
         selection_block=64,
         selected_block_count=16,
         sliding_window=512,
@@ -85,11 +103,17 @@ class NSAAttention(nn.Module):
         self.softmax_scale = softmax_scale
         self.drop_p = attention_dropout
         self.deterministic = deterministic
-        self.gating == nn.Linear(embedding_size, 3)
-        self.compression_attn = CompressionAttn(compression_stride, comression_block, head_dim, self.flash_attn_func, device, dtype)
-        self.selection_attn = SelectionAttn(selection_block, selected_block_count, self.flash_attn_func)
+        #self.compression_attn = CompressionAttn(compression_stride, compression_block, head_dim, device, dtype)
+        #self.selection_attn = SelectionAttn(selection_block, selected_block_count, compression_stride, comression_block)
         self.sliding_window = sliding_window
-        
+        self.selected_block_count = selected_block_count
+        self.selection_block_size = selection_block
+        self.compressor = KVCompressor(compression_stride, compression_block, head_dim, device, dtype)
+        kernel_size = selection_block // compression_stride + 1
+        padding = compression_block // compression_stride - 2
+        stride = selection_block // compression_stride
+        self.pooler = torch.nn.AvgPool1d(kernel_size, stride, padding, True)
+        self.gating = nn.Linear(head_dim, 3)
 
     def forward(
         self,
@@ -98,7 +122,6 @@ class NSAAttention(nn.Module):
         v: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
-        x: torch.Tensor,
         cu_seqlens_k: torch.Tensor = None,
         max_seqlen_k: torch.Tensor = None,
         causal: bool = None,
@@ -121,62 +144,33 @@ class NSAAttention(nn.Module):
         """
         causal = self.causal if causal is None else causal
         cu_seqlens_k = cu_seqlens if cu_seqlens_k is None else cu_seqlens_k
-        max_seqlen_k = max_seqlen if max_seqlen_k is None else max_seqlen_k
+        # max_seqlen_k = max_seqlen if max_seqlen_k is None else max_seqlen_k
 
-        # compression attn
-        flash_kwargs = {
-            "q": q,
-            "k": k,
-            "v": v,
-            "cu_seqlens_q": cu_seqlens,
-            "cu_seqlens_k": cu_seqlens_k,
-            "max_seqlen_q": max_seqlen,
-            "max_seqlen_k": max_seqlen_k,
-            "softmax_scale": self.softmax_scale,
-            "causal": causal,
-            "deterministic": self.deterministic,
-        }
-        if not self._is_v3:
-            flash_kwargs["dropout_p"] = self.drop_p
-        compress_attn_out, attn_score = self.compression_attn(**flash_kwargs)
-
-        # selection attn
-        flash_kwargs = {
-            "q": q,
-            "k": k,
-            "v": v,
-            "cu_seqlens_q": cu_seqlens,
-            "cu_seqlens_k": cu_seqlens_k,
-            "max_seqlen_q": max_seqlen,
-            "max_seqlen_k": max_seqlen_k,
-            "softmax_scale": self.softmax_scale,
-            "causal": causal,
-            "deterministic": self.deterministic,
-            'attn_score': attn_score,
-        }
-        if not self._is_v3:
-            flash_kwargs["dropout_p"] = self.drop_p
-        selection_attn_out = self.selection_attn(**flash_kwargs)
-
-        # local attn
-        flash_kwargs = {
-            "q": q,
-            "k": k,
-            "v": v,
-            "cu_seqlens_q": cu_seqlens,
-            "cu_seqlens_k": cu_seqlens_k,
-            "max_seqlen_q": max_seqlen,
-            "max_seqlen_k": max_seqlen_k,
-            "softmax_scale": self.softmax_scale,
-            "causal": causal,
-            "window_size": (self.sliding_window, 0),
-            "deterministic": self.deterministic,
-        }
-        output = self.flash_attn_func(**flash_kwargs)
-        output = output[0] if self._is_v3 else output
+        # compress attention
+        ck, cv, compress_cu_kv_len = self.compressor(k, v, cu_seqlens_k)
+        bs = cu_seqlens_k.numel()-1
+        num_q_head, head_qk_dim = q.shape[1:]
+        num_token, num_kv_head, head_v_dim = v.shape
+        seq_len = num_token // bs
+        q = q.reshape(bs, -1, num_q_head, head_qk_dim)
+        k = k.reshape(bs, seq_len, num_kv_head, head_qk_dim)
+        v = v.reshape(bs, seq_len, num_kv_head, head_v_dim)
+        cmp_o, attn_score = attn_func(q, k, v, self.compression_stride, self.compression_block, 
+                                            causal=causal, scale=self.softmax_scale)
         
+        # gating
+        gating_score = self.gating(q) # b, hq, t, 3
         
-        # v3 always returns softmax_sce
-        return output
+        # selection and local attention
+        compress_seq_len = attn_score.shape[1]
+        score = attn_score.reshape(bs, num_kv_head, -1, *attn_score.shape[-2:]).sum(2)
+        score = score.reshape(-1, *score.shape[2:])
+        score = self.pooler(score).reshape(bs, num_kv_head, score.shape[-2:]) # -> B, H, T1, T2
+        indices = torch.topk(score, self.selection_block_count, dim=3).indices
 
-# q, k, v should before position embedding
+        o = selection_attention(q, k, v, self.gating[...,0], self.gating[...,1], indices, self.selected_block_count, 
+                            self.selection_block_size, self.sliding_window, scale=self.softmax_scale)
+        
+        o = torch.addcmul(o, self.gating[..., 2], cmp_o)
+
+        return o
