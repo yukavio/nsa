@@ -1,10 +1,12 @@
 import torch
-from nsa.nsa import CompressionAttn
-from nsa.torch_attention import attention_ref as attn_func
+
 from nsa import selection_attention
 from nsa.nsa import NSAAttention
 
-bs, num_q_head, num_kv_head, head_dim = 3, 32, 2, 128
+# from nsa.nsa import CompressionAttn
+from nsa.torch_attention import attention_ref as attn_func
+
+bs, num_q_head, num_kv_head, head_dim = 3, 16, 1, 128
 compress_block_size, compress_block_stride = 64, 16
 selection_block, selected_block_count = 64, 32
 seq_len = 1024*8
