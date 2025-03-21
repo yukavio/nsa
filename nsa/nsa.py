@@ -4,7 +4,7 @@ from torch import nn
 
 from nsa import selection_attention
 from nsa.compression_kv import KVCompressor
-from nsa.torch_attention import attention_ref as attn_func
+from nsa.torch_attention import torch_attntion as attn_func
 
 try:
     from flash_attn_interface import flash_attn_varlen_func as flash_attn_v3_func
@@ -120,7 +120,8 @@ class NSAAttention(nn.Module):
         score = score.reshape(-1, *score.shape[2:])
         score = self.pooler(score)
         score = score.reshape(bs, num_kv_head, *score.shape[-2:])  # -> B, H, T1, T2
-        indices = torch.topk(score, self.selected_block_count, dim=3).indices
+        indices = torch.topk(score, self.selected_block_count, dim=3).indices # B, H, T, S
+        indices = indices.transpose(1, 2)
 
         k = k.reshape(bs, -1, num_kv_head, head_qk_dim)
         v = v.reshape(bs, -1, num_kv_head, head_v_dim)
@@ -138,6 +139,7 @@ class NSAAttention(nn.Module):
         )
 
         o = torch.addcmul(o, gating_score[..., 2].unsqueeze(-1), cmp_o)
+
 
         return o.reshape(-1, *o.shape[-2:])
 

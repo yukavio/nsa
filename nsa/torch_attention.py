@@ -1,10 +1,10 @@
 import math
+
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-import torch.nn.functional as F
 from einops import rearrange, repeat
-
 
 # @triton.autotune(
 #     configs=[
@@ -200,4 +200,52 @@ def attention_ref(
     if query_padding_mask is not None:
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
     return output.to(dtype=dtype_og), compress_score
+
+
+def torch_attntion(
+    q,
+    k,
+    v,
+    block_stride, 
+    block_size,
+    query_padding_mask=None,
+    key_padding_mask=None,
+    attn_bias=None,
+    dropout_p=0.0,
+    dropout_mask=None,
+    causal=False,
+    window_size=(-1, -1),  # -1 means infinite window size
+    softcap=0.0,
+    upcast=True,
+    reorder_ops=False,
+    key_leftpad=None,
+    scale=None
+):
+    bs, seqlen_q, seqlen_k = *q.shape[:2], k.shape[1]
+    with torch.no_grad():
+        local_mask = construct_local_mask(
+                seqlen_q,
+                seqlen_k,
+                block_stride,
+                block_size,
+                window_size,
+                query_padding_mask,
+                key_padding_mask,
+                q.device,
+                key_leftpad=key_leftpad,
+            )
+    local_mask = local_mask.unsqueeze(0).repeat([bs, 1, 1])
+    q = q.transpose(1, 2) # b, h, t, d
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+    local_mask = local_mask.unsqueeze(1)
+
+    o = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
+        attn_mask=local_mask, dropout_p=dropout_p, scale=scale, enable_gqa=True)
+    
+    with torch.no_grad():
+        k = repeat(k, "b s h d -> b s (h g) d", g=q.shape[1] // k.shape[1])
+        s = torch.einsum("bhtd, bhsd->bhts", q, k)
+        s = torch.nn.functional.softmax(s, dim=-1)
+    return o.transpose(1, 2), s
 
