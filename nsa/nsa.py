@@ -115,7 +115,6 @@ class NSAAttention(nn.Module):
         gating_score = self.gating(q)  # b, hq, t, 3
 
         # selection and local attention
-        compress_seq_len = attn_score.shape[1]
         score = attn_score.reshape(bs, num_kv_head, -1, *attn_score.shape[-2:]).sum(2)
         score = score.reshape(-1, *score.shape[2:])
         score = self.pooler(score)
@@ -132,7 +131,7 @@ class NSAAttention(nn.Module):
             gating_score[..., 0],
             gating_score[..., 1],
             indices,
-            self.selected_block_count,
+            None,
             self.selection_block_size,
             self.sliding_window,
             scale=self.softmax_scale,

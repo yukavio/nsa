@@ -244,7 +244,7 @@ def torch_attntion(
         attn_mask=local_mask, dropout_p=dropout_p, scale=scale, enable_gqa=True)
     
     with torch.no_grad():
-        k = repeat(k, "b s h d -> b s (h g) d", g=q.shape[1] // k.shape[1])
+        k = repeat(k, "b h s d -> b (h g) s d", g=q.shape[1] // k.shape[1])
         s = torch.einsum("bhtd, bhsd->bhts", q, k)
         s = torch.nn.functional.softmax(s, dim=-1)
     return o.transpose(1, 2), s
