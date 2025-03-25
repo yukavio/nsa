@@ -1,10 +1,10 @@
 import torch
 from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_v2_func
 from torch import nn
-
+from einops import rearrange, repeat
 from nsa import selection_attention
 from nsa.compression_kv import KVCompressor
-from nsa.torch_attention import torch_attntion as attn_func
+from nsa.triton_attention import flash_attn_func as attn_func
 
 try:
     from flash_attn_interface import flash_attn_varlen_func as flash_attn_v3_func
@@ -101,19 +101,22 @@ class NSAAttention(nn.Module):
         ck = ck.reshape(bs, -1, num_kv_head, head_qk_dim)
         cv = cv.reshape(bs, -1, num_kv_head, head_v_dim)
 
+        ck = repeat(ck, "b s h d -> b s (h g) d", g=q.shape[2] // ck.shape[2])
+        cv = repeat(cv, "b s h d -> b s (h g) d", g=q.shape[2] // cv.shape[2])
+
         cmp_o, attn_score = attn_func(
             q,
             ck,
             cv,
             self.compression_stride,
             self.compression_block,
-            causal=causal,
-            scale=self.softmax_scale,
+            None,
+            causal,
+            self.softmax_scale,
         )
 
         # gating
         gating_score = self.gating(q)  # b, hq, t, 3
-
         # selection and local attention
         score = attn_score.reshape(bs, num_kv_head, -1, *attn_score.shape[-2:]).sum(2)
         score = score.reshape(-1, *score.shape[2:])

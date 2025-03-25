@@ -104,6 +104,8 @@ def _fwd_kernel(
     EVEN_HEADDIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    block_stride: tl.constexpr,
+    block_size: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     off_hb = tl.program_id(1)
@@ -182,12 +184,12 @@ def _fwd_kernel(
                     other=0.0,
                 )
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk += tl.dot(q, k, trans_b=True)
+        qk += tl.dot(q, tl.trans(k))
         # Trying to combine the two masks seem to make the result wrong
         if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
             qk += tl.where((start_n + offs_n)[None, :] < seqlen_k, 0, float("-inf"))
         if IS_CAUSAL:
-            qk += tl.where(offs_m[:, None] >= (start_n + offs_n)[None, :], 0, float("-inf"))
+            qk += tl.where(offs_m[:, None] >= ((start_n + offs_n)*block_stride+block_size)[None, :], 0, float("-inf"))
         if BIAS_TYPE != "none":
             if BIAS_TYPE == "vector":
                 if EVEN_N:
@@ -397,6 +399,8 @@ def _bwd_kernel_one_col_block(
     EVEN_HEADDIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    block_stride: tl.constexpr,
+    block_size: tl.constexpr
 ):
     # We need to make sure begin_m is a multiple of BLOCK_M (not BLOCK_N)
     begin_m = 0 if not IS_CAUSAL else ((start_n * BLOCK_N) // BLOCK_M) * BLOCK_M
@@ -479,12 +483,12 @@ def _bwd_kernel_one_col_block(
                     other=0.0,
                 )
         # recompute p = softmax(qk, dim=-1).T
-        qk = tl.dot(q, k, trans_b=True)
+        qk = tl.dot(q, tl.trans(k))
         # Trying to combine the two masks seem to make the result wrong
         if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
             qk = tl.where(offs_n[None, :] < seqlen_k, qk, float("-inf"))
         if IS_CAUSAL:
-            qk = tl.where(offs_m_curr[:, None] >= (offs_n[None, :]), qk, float("-inf"))
+            qk = tl.where(offs_m_curr[:, None] >= ((offs_n[None, :])*block_stride+block_size), qk, float("-inf"))
         if BIAS_TYPE != "none":
             tl.debug_barrier()  # Race condition otherwise
             if BIAS_TYPE == "vector":
@@ -537,14 +541,14 @@ def _bwd_kernel_one_col_block(
         #     else:
         #         do = tl.load(do_ptrs, mask=(offs_m_curr[:, None] < seqlen_q)
         #                                    & (offs_d[None, :] < headdim), other=0.0)
-        dv += tl.dot(p.to(do.dtype), do, trans_a=True)
+        dv += tl.dot(p.to(do.dtype), tl.trans(do))
         # compute dp = dot(v, do)
         # There seems to be a race condition when headdim=48/96, and dq, dk are wrong.
         # Also wrong for headdim=128, seqlen=(108, 256), and ATOMIC_ADD=True
         # Also wrong for headdim=64, seqlen=(1023, 1024), and ATOMIC_ADD=False
         if not (EVEN_M & EVEN_HEADDIM):
             tl.debug_barrier()
-        dp = tl.dot(do, v, trans_b=True)
+        dp = tl.dot(do, tl.trans(v))
         # There's a race condition for headdim=48
         if not EVEN_HEADDIM:
             tl.debug_barrier()
@@ -555,7 +559,7 @@ def _bwd_kernel_one_col_block(
         # for BLOCK_HEADDIM=128
         ds = (p * (dp - Di[:, None]) * softmax_scale).to(q.dtype)
         # compute dk = dot(ds.T, q)
-        dk += tl.dot(ds, q, trans_a=True)
+        dk += tl.dot(tl.trans(ds), q)
         # compute dq
         if not (
             EVEN_M & EVEN_HEADDIM
@@ -719,6 +723,8 @@ def _bwd_kernel(
     EVEN_HEADDIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    block_stride: tl.constexpr,
+    block_size: tl.constexpr
 ):
     off_hb = tl.program_id(1)
     off_b = off_hb // nheads
@@ -772,6 +778,8 @@ def _bwd_kernel(
                 EVEN_HEADDIM=EVEN_HEADDIM,
                 BLOCK_M=BLOCK_M,
                 BLOCK_N=BLOCK_N,
+                block_stride=block_stride,
+                block_size=block_size,
             )
     else:
         start_n = tl.program_id(0)
@@ -808,10 +816,12 @@ def _bwd_kernel(
             EVEN_HEADDIM=EVEN_HEADDIM,
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
+            block_stride=block_stride,
+            block_size=block_size,
         )
 
 
-def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
+def _flash_attn_forward(q, k, v, block_stride, block_size, bias=None, causal=False, softmax_scale=None):
     # shape constraints
     batch, seqlen_q, nheads, d = q.shape
     _, seqlen_k, _, _ = k.shape
@@ -887,6 +897,8 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
         BLOCK_HEADDIM,
         BLOCK_M=BLOCK,
         BLOCK_N=BLOCK,
+        block_stride=block_stride,
+        block_size=block_size,
         num_warps=num_warps,
         num_stages=1,
     )
@@ -894,7 +906,7 @@ def _flash_attn_forward(q, k, v, bias=None, causal=False, softmax_scale=None):
 
 
 def _flash_attn_backward(
-    do, q, k, v, o, lse, dq, dk, dv, bias=None, causal=False, softmax_scale=None
+    do, q, k, v, o, lse, dq, dk, dv, block_stride, block_size, bias=None, causal=False, softmax_scale=None
 ):
     # Make sure that the last dimension is contiguous
     if do.stride(-1) != 1:
@@ -1004,6 +1016,8 @@ def _flash_attn_backward(
         bias_type,
         causal,
         BLOCK_HEADDIM,
+        block_stride=block_stride,
+        block_size=block_size,
         # SEQUENCE_PARALLEL=False,
         # BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         # num_warps=num_warps,
@@ -1012,110 +1026,9 @@ def _flash_attn_backward(
     dq.copy_(dq_accum)
 
 
-class FlashAttnQKVPackedFunc(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, qkv, bias=None, causal=False, softmax_scale=None):
-        """
-        qkv: (batch, seqlen, 3, nheads, headdim)
-        bias: optional, shape broadcastible to (batch, nheads, seqlen, seqlen).
-            For example, ALiBi mask for causal would have shape (1, nheads, 1, seqlen).
-            ALiBi mask for non-causal would have shape (1, nheads, seqlen, seqlen)
-        """
-        # Make sure that the last dimension is contiguous
-        if qkv.stride(-1) != 1:
-            qkv = qkv.contiguous()
-        o, lse, ctx.softmax_scale = _flash_attn_forward(
-            qkv[:, :, 0],
-            qkv[:, :, 1],
-            qkv[:, :, 2],
-            bias=bias,
-            causal=causal,
-            softmax_scale=softmax_scale,
-        )
-        ctx.save_for_backward(qkv, o, lse, bias)
-        ctx.causal = causal
-        return o
-
-    @staticmethod
-    def backward(ctx, do):
-        qkv, o, lse, bias = ctx.saved_tensors
-        assert not ctx.needs_input_grad[1], "FlashAttention does not support bias gradient yet"
-        # Triton's autotune causes the Tensor._version to change, and so Pytorch autograd
-        # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
-        with torch.inference_mode():
-            dqkv = torch.empty_like(qkv)
-            _flash_attn_backward(
-                do,
-                qkv[:, :, 0],
-                qkv[:, :, 1],
-                qkv[:, :, 2],
-                o,
-                lse,
-                dqkv[:, :, 0],
-                dqkv[:, :, 1],
-                dqkv[:, :, 2],
-                bias=bias,
-                causal=ctx.causal,
-                softmax_scale=ctx.softmax_scale,
-            )
-        return dqkv, None, None, None
-
-
-flash_attn_qkvpacked_func = FlashAttnQKVPackedFunc.apply
-
-
-class FlashAttnKVPackedFunc(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, q, kv, bias=None, causal=False, softmax_scale=None):
-        """
-        q: (batch, seqlen_q, nheads, headdim)
-        kv: (batch, seqlen_k, 2, nheads, headdim)
-        bias: optional, shape broadcastible to (batch, nheads, seqlen_q, seqlen_k).
-            For example, ALiBi mask for causal would have shape (1, nheads, 1, seqlen_k).
-            ALiBi mask for non-causal would have shape (1, nheads, seqlen_q, seqlen_k)
-        """
-        # Make sure that the last dimension is contiguous
-        q, kv = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, kv]]
-        o, lse, ctx.softmax_scale = _flash_attn_forward(
-            q, kv[:, :, 0], kv[:, :, 1], bias=bias, causal=causal, softmax_scale=softmax_scale
-        )
-        ctx.save_for_backward(q, kv, o, lse, bias)
-        ctx.causal = causal
-        return o
-
-    @staticmethod
-    def backward(ctx, do):
-        q, kv, o, lse, bias = ctx.saved_tensors
-        if len(ctx.needs_input_grad) >= 3:
-            assert not ctx.needs_input_grad[2], "FlashAttention does not support bias gradient yet"
-        # Triton's autotune causes the Tensor._version to change, and so Pytorch autograd
-        # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
-        with torch.inference_mode():
-            dq = torch.empty_like(q)
-            dkv = torch.empty_like(kv)
-            _flash_attn_backward(
-                do,
-                q,
-                kv[:, :, 0],
-                kv[:, :, 1],
-                o,
-                lse,
-                dq,
-                dkv[:, :, 0],
-                dkv[:, :, 1],
-                bias=bias,
-                causal=ctx.causal,
-                softmax_scale=ctx.softmax_scale,
-            )
-        return dq, dkv, None, None, None
-
-
-flash_attn_kvpacked_func = FlashAttnKVPackedFunc.apply
-
-
 class FlashAttnFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, bias=None, causal=False, softmax_scale=None):
+    def forward(ctx, q, k, v, block_stride, block_size, bias=None, causal=False, softmax_scale=None):
         """
         q: (batch_size, seqlen_q, nheads, headdim)
         k, v: (batch_size, seqlen_k, nheads, headdim)
@@ -1126,14 +1039,19 @@ class FlashAttnFunc(torch.autograd.Function):
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
         o, lse, ctx.softmax_scale = _flash_attn_forward(
-            q, k, v, bias=bias, causal=causal, softmax_scale=softmax_scale
+            q, k, v, block_stride, block_size, bias=bias, causal=causal, softmax_scale=softmax_scale
         )
         ctx.save_for_backward(q, k, v, o, lse, bias)
         ctx.causal = causal
-        return o
+        ctx.block_stride = block_stride
+        ctx.block_size = block_size
+
+        s = torch.einsum("bthd, bshd->bhts", q, k)
+        s = torch.nn.functional.softmax(s, dim=-1)
+        return o, s
 
     @staticmethod
-    def backward(ctx, do):
+    def backward(ctx, do, s):
         q, k, v, o, lse, bias = ctx.saved_tensors
         assert not ctx.needs_input_grad[3], "FlashAttention does not support bias gradient yet"
         # Triton's autotune causes the Tensor._version to change, and so Pytorch autograd
@@ -1152,11 +1070,13 @@ class FlashAttnFunc(torch.autograd.Function):
                 dq,
                 dk,
                 dv,
+                block_stride=ctx.block_stride,
+                block_size=ctx.block_size,
                 bias=bias,
                 causal=ctx.causal,
                 softmax_scale=ctx.softmax_scale,
             )
-        return dq, dk, dv, None, None, None
+        return dq, dk, dv, None, None, None, None, None
 
 
 flash_attn_func = FlashAttnFunc.apply

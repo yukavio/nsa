@@ -5,62 +5,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 from einops import rearrange, repeat
-
-# @triton.autotune(
-#     configs=[
-#         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256}, num_stages=3,
-#                       num_warps=8),
-#         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256}, num_stages=4,
-#                       num_warps=4),
-#         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128}, num_stages=4,
-#                       num_warps=4),
-#         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64}, num_stages=4,
-#                       num_warps=4),
-#     ],
-#     key=['bs', 'num_heads'],
-# )
-# @triton.jit
-# def varlen_gemm_qk_kernel(
-#     # device tensor of matrices pointers
-#     q,
-#     k,
-#     out,
-#     cu_seq_len,
-#     batch_size,
-#     num_heads: tl.constexpr,
-#     num_kv_heads: tl.constexpr,
-#     # number of virtual SM
-#     NUM_SM: tl.constexpr,
-#     # tile sizes
-#     BLOCK_SIZE_M: tl.constexpr,
-#     BLOCK_SIZE_N: tl.constexpr,
-#     BLOCK_SIZE_K: tl.constexpr,
-# ):
-#     head_idx = tl.program_id(0)
-#     bs_idx = tl.program_id(1)
-#     seq_idx = tl.program_id(2)
-    
-#     last_problem_end = 0
-    
-
-# def varlen_gemm_qk(q, k, qk_scale, cu_seq_len, bs, 
-#                num_heads, num_kv_heads, head_dim):
-#     out_len = cu_seq_len.pow(2).sum().item()
-#     # h, b, t, t
-#     out = torch.empty(size=(num_heads, out_len), dype=torch.float32, device=q.device)
-#     grid = (num_heads, bs, 16)
-#     varlen_gemm_qk_kernel[grid](
-#         q,
-#         k,
-#         out,
-#         cu_seq_len,
-#         bs,
-#         num_heads,
-#         num_kv_heads,
-#         head_dim,
-#         NUM_SM=16,
-#         BLOCK_SIZE_K=head_dim,
-#     )
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 # Copy from https://github.com/Dao-AILab/flash-attention/blob/main/tests/test_flash_attn.py
@@ -240,8 +185,9 @@ def torch_attntion(
     v = v.transpose(1, 2)
     local_mask = local_mask.unsqueeze(1)
 
-    o = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
-        attn_mask=local_mask, dropout_p=dropout_p, scale=scale, enable_gqa=True)
+    with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+        o = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
+            attn_mask=local_mask, dropout_p=dropout_p, scale=scale, enable_gqa=True)
     
     with torch.no_grad():
         k = repeat(k, "b h s d -> b (h g) s d", g=q.shape[1] // k.shape[1])

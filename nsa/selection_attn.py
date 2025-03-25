@@ -710,7 +710,6 @@ class ParallelNSAFunction(torch.autograd.Function):
         ctx.block_size = block_size
         ctx.window_size = window_size
         ctx.scale = scale
-        print('in forward')
         return o_slc.to(q.dtype), o_swa.to(q.dtype) if o_swa is not None else o_swa
 
     @staticmethod
@@ -718,7 +717,6 @@ class ParallelNSAFunction(torch.autograd.Function):
     @autocast_custom_bwd
     def backward(ctx, do_slc, do_swa):
         q, k, v, o_slc, lse_slc, o_swa, lse_swa = ctx.saved_tensors
-        print('in backward')
         dq, dk, dv = parallel_nsa_bwd(
             q=q,
             k=k,
