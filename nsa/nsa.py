@@ -3,7 +3,7 @@ from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn
 from torch import nn
 from einops import rearrange, repeat
 from nsa import selection_attention
-from nsa.compression_kv import KVCompressor
+from nsa.compression_kv import KVCompressor, KVCompressorVarlen
 from nsa.triton_attention import flash_attn_func as attn_func
 
 try:
@@ -91,18 +91,13 @@ class NSAAttention(nn.Module):
         cu_seqlens_k = cu_seqlens if cu_seqlens_k is None else cu_seqlens_k
         # max_seqlen_k = max_seqlen if max_seqlen_k is None else max_seqlen_k
 
-        # compress attention
-        ck, cv, compress_cu_kv_len = self.compressor(k, v, cu_seqlens_k)
         bs = cu_seqlens_k.numel() - 1
         num_q_head, head_qk_dim = q.shape[1:]
         num_token, num_kv_head, head_v_dim = v.shape
-        seq_len = num_token // bs
-        q = q.reshape(bs, -1, num_q_head, head_qk_dim)
-        ck = ck.reshape(bs, -1, num_kv_head, head_qk_dim)
-        cv = cv.reshape(bs, -1, num_kv_head, head_v_dim)
+        q = q.reshape(bs, -1, num_q_head, head_qk_dim)  
 
-        ck = repeat(ck, "b s h d -> b s (h g) d", g=q.shape[2] // ck.shape[2])
-        cv = repeat(cv, "b s h d -> b s (h g) d", g=q.shape[2] // cv.shape[2])
+        # compress attention
+        ck, cv, compress_cu_kv_len = self.compressor(k, v, cu_seqlens_k, num_q_head//k.shape[1]) # ck/cv: B, T, H*q, D
 
         cmp_o, attn_score = attn_func(
             q,

@@ -4,6 +4,7 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 from torch.nn import init
+from einops import rearrange, repeat
 
 def calc_compressed_len(x, stride, size):
     return  (x - size) // stride
@@ -268,7 +269,7 @@ class _compress_kv(torch.autograd.Function):
 compress_kv = _compress_kv.apply
 
 
-class KVCompressor(nn.Module):
+class KVCompressorVarlen(nn.Module):
     def __init__(self, block_stride, block_size, head_dim, device, dtype):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -278,7 +279,7 @@ class KVCompressor(nn.Module):
         self.v_weight = nn.Parameter(torch.empty(block_size*head_dim, head_dim, **factory_kwargs))
         self.reset_parameters()
 
-    def forward(self, k, v, cu_seq_len):
+    def forward(self, k, v, cu_seq_len, group=None):
         compress_k, compress_v, cu_out_len = compress_kv(k, v, self.k_weight,
             self.v_weight, cu_seq_len, self.block_stride, self.block_size)
         return compress_k, compress_v, cu_out_len
@@ -287,3 +288,28 @@ class KVCompressor(nn.Module):
         init.kaiming_uniform_(self.k_weight, a=math.sqrt(5))
         init.kaiming_uniform_(self.v_weight, a=math.sqrt(5))
             
+
+class KVCompressor(nn.Module):
+    def __init__(self, block_stride, block_size, head_dim, device, dtype):
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.block_stride = block_stride
+        self.block_size = block_size
+        self.compressor_k = nn.Conv1d(head_dim, head_dim, block_size, block_stride, **factory_kwargs)
+        self.compressor_v = nn.Conv1d(head_dim, head_dim, block_size, block_stride, **factory_kwargs)
+
+    def forward(self, k, v, cu_seq_len, group=None):
+        BT, H, D = k.shape
+        B = cu_seq_len.shape[0] - 1
+        ck = k.reshape(B, -1, H, D).permute(0, 2, 3, 1).reshape(B*H, D, -1)  # B, T, H, D -> BH, D, T
+        cv = v.reshape(B, -1, H, D).permute(0, 2, 3, 1).reshape(B*H, D, -1)
+        ck = self.compressor_k(ck).reshape(B, H, D, -1).permute(0, 3, 1, 2)
+        cv = self.compressor_v(cv).reshape(B, H, D, -1).permute(0, 3, 1, 2)
+        if group is not None:
+            ck = repeat(ck, "b s h d -> b s (h g) d", g=group)
+            cv = repeat(cv, "b s h d -> b s (h g) d", g=group)
+
+        return ck, cv, cu_seq_len
+
+    
+
