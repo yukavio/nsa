@@ -278,14 +278,16 @@ def _fwd_kernel(
         if EVEN_HEADDIM:
             tl.store(out_ptrs, acc_o)
         else:
-            tl.store(out_ptrs, acc_o, mask=offs_d[None, :] < headdim)
+            tl.store(out_ptrs, acc_o.to(Q.type.element_ty), mask=offs_d[None, :] < headdim)
     else:
         if EVEN_HEADDIM:
-            tl.store(out_ptrs, acc_o, mask=offs_m[:, None] < seqlen_q)
+            tl.store(out_ptrs, acc_o.to(Q.type.element_ty), mask=offs_m[:, None] < seqlen_q)
         else:
             tl.store(
-                out_ptrs, acc_o, mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim)
+                out_ptrs, acc_o.to(Q.type.element_ty), mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim)
             )
+    if tl.program_id(0) == 0:
+        tl.store(out_ptrs, tl.zeros([BLOCK_M, BLOCK_HEADDIM], dtype=Q.type.element_ty),  mask=(offs_m[:, None] < block_size))
 
 
 @triton.jit
@@ -404,6 +406,7 @@ def _bwd_kernel_one_col_block(
 ):
     # We need to make sure begin_m is a multiple of BLOCK_M (not BLOCK_N)
     begin_m = 0 if not IS_CAUSAL else ((start_n * BLOCK_N) // BLOCK_M) * BLOCK_M
+    begin_m = begin_m * block_stride + block_size
     # initialize row/col offsets
     offs_qm = begin_m + tl.arange(0, BLOCK_M)
     offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -569,7 +572,7 @@ def _bwd_kernel_one_col_block(
             if EVEN_M & EVEN_HEADDIM:  # Race condition if we just do EVEN_M
                 dq = tl.load(dq_ptrs, eviction_policy="evict_last")
                 dq += tl.dot(ds, k)
-                tl.store(dq_ptrs, dq, eviction_policy="evict_last")
+                tl.store(dq_ptrs, dq.to(DO.type.element_ty), mask=offs_m_curr[:, None]>=block_size, eviction_policy="evict_last")
             else:
                 if EVEN_HEADDIM:
                     dq = tl.load(
@@ -581,8 +584,8 @@ def _bwd_kernel_one_col_block(
                     dq += tl.dot(ds, k)
                     tl.store(
                         dq_ptrs,
-                        dq,
-                        mask=offs_m_curr[:, None] < seqlen_q,
+                        dq.to(DO.type.element_ty),
+                        mask=offs_m_curr[:, None] < seqlen_q and offs_m_curr[:, None]>=block_size,
                         eviction_policy="evict_last",
                     )
                 else:
@@ -595,8 +598,8 @@ def _bwd_kernel_one_col_block(
                     dq += tl.dot(ds, k)
                     tl.store(
                         dq_ptrs,
-                        dq,
-                        mask=(offs_m_curr[:, None] < seqlen_q) & (offs_d[None, :] < headdim),
+                        dq.to(DO.type.element_ty),
+                        mask=(offs_m_curr[:, None] < seqlen_q) & (offs_d[None, :] < headdim) and offs_m_curr[:, None]>=block_size,
                         eviction_policy="evict_last",
                     )
         else:  # If we're parallelizing across the seqlen_k dimension
@@ -636,24 +639,19 @@ def _bwd_kernel_one_col_block(
     )
 
 
-def init_to_zero(name):
-    return lambda nargs: nargs[name].zero_()
-
-
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "SEQUENCE_PARALLEL": False},
+            {"BLOCK_M": 32, "BLOCK_N": 32, "SEQUENCE_PARALLEL": False},
             num_warps=8,
             num_stages=1,
-            pre_hook=init_to_zero("DQ"),
         ),
-        triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "SEQUENCE_PARALLEL": True},
-            num_warps=8,
-            num_stages=1,
-            pre_hook=init_to_zero("DQ"),
-        ),
+        # triton.Config(
+        #     {"BLOCK_M": 128, "BLOCK_N": 128, "SEQUENCE_PARALLEL": True},
+        #     num_warps=8,
+        #     num_stages=1,
+        #     pre_hook=init_to_zero("DQ"),
+        # ),
         # Other configs seem to give wrong results when seqlen_q % 128 != 0, disabling them for now
         # # Kernel is buggy (give wrong result) if we set BLOCK_m=128, BLOCK_n=64, num_warps=*4*
         # triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False}, num_warps=8, num_stages=1, pre_hook=init_to_zero('DQ')),
@@ -1039,7 +1037,7 @@ class FlashAttnFunc(torch.autograd.Function):
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
         o, lse, ctx.softmax_scale = _flash_attn_forward(
-            q, k, v, block_stride, block_size, bias=bias, causal=causal, softmax_scale=softmax_scale
+            q, k, v, block_stride, block_size, bias=bias, causal=causal, softmax_scale=None
         )
         ctx.save_for_backward(q, k, v, o, lse, bias)
         ctx.causal = causal
@@ -1057,7 +1055,7 @@ class FlashAttnFunc(torch.autograd.Function):
         # Triton's autotune causes the Tensor._version to change, and so Pytorch autograd
         # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
         with torch.inference_mode():
-            dq = torch.empty_like(q)
+            dq = torch.zeros_like(q)
             dk = torch.empty_like(k)
             dv = torch.empty_like(v)
             _flash_attn_backward(

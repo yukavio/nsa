@@ -111,7 +111,7 @@ class NSAAttention(nn.Module):
         )
 
         # gating
-        gating_score = self.gating(q)  # b, hq, t, 3
+        gating_score = self.gating(q)  # b, t, hq, 3
         # selection and local attention
         score = attn_score.reshape(bs, num_kv_head, -1, *attn_score.shape[-2:]).sum(2)
         score = score.reshape(-1, *score.shape[2:])
@@ -136,7 +136,6 @@ class NSAAttention(nn.Module):
         )
 
         o = torch.addcmul(o, gating_score[..., 2].unsqueeze(-1), cmp_o)
-
 
         return o.reshape(-1, *o.shape[-2:])
 
