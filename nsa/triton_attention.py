@@ -183,8 +183,8 @@ def _fwd_kernel(
                     mask=((start_n + offs_n)[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
                     other=0.0,
                 )
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk += tl.dot(q, tl.trans(k))
+        #qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        qk = tl.dot(q, tl.trans(k))
         # Trying to combine the two masks seem to make the result wrong
         if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
             qk += tl.where((start_n + offs_n)[None, :] < seqlen_k, 0, float("-inf"))
@@ -829,8 +829,8 @@ def _flash_attn_forward(q, k, v, block_stride, block_size, bias=None, causal=Fal
     assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
     assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
     assert q.is_cuda and k.is_cuda and v.is_cuda
-    softmax_scale = softmax_scale or 1.0 / math.sqrt(d)
-
+    if softmax_scale is None:
+        softmax_scale = 1.0 / math.sqrt(d)
     has_bias = bias is not None
     bias_type = "none"
     if has_bias:
@@ -1037,7 +1037,7 @@ class FlashAttnFunc(torch.autograd.Function):
         # Make sure that the last dimension is contiguous
         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
         o, lse, ctx.softmax_scale = _flash_attn_forward(
-            q, k, v, block_stride, block_size, bias=bias, causal=causal, softmax_scale=None
+            q, k, v, block_stride, block_size, bias=bias, causal=causal, softmax_scale=softmax_scale
         )
         ctx.save_for_backward(q, k, v, o, lse, bias)
         ctx.causal = causal
@@ -1046,7 +1046,7 @@ class FlashAttnFunc(torch.autograd.Function):
 
         s = torch.einsum("bthd, bshd->bhts", q, k)
         s = torch.nn.functional.softmax(s, dim=-1)
-        return o, s
+        return o, s.to(torch.float32)
 
     @staticmethod
     def backward(ctx, do, s):

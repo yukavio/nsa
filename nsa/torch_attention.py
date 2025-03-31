@@ -62,7 +62,7 @@ def attention_ref(
     causal=False,
     window_size=(-1, -1),  # -1 means infinite window size
     softcap=0.0,
-    upcast=True,
+    upcast=False,
     reorder_ops=False,
     key_leftpad=None,
     scale=None
@@ -94,22 +94,21 @@ def attention_ref(
     if upcast:
         q, k, v = q.float(), k.float(), v.float()
     seqlen_q, seqlen_k = q.shape[1], k.shape[1]
-    k = repeat(k, "b s h d -> b s (h g) d", g=q.shape[2] // k.shape[2])
-    v = repeat(v, "b s h d -> b s (h g) d", g=q.shape[2] // v.shape[2])
     d = q.shape[-1]
     if scale is None:
         scale = 1 / math.sqrt(d)
     if not reorder_ops:
-        scores = torch.einsum("bthd,bshd->bhts", q * scale, k)
+        scores = torch.einsum("bthd,bshd->bhts", q, k)
     else:
-        scores = torch.einsum("bthd,bshd->bhts", q, k * scale)
-    if softcap > 0:
-        scores = scores / softcap
-        scores = scores.tanh()
-        scores = scores * softcap
-    if key_padding_mask is not None:
-        scores.masked_fill_(rearrange(~key_padding_mask, "b s -> b 1 1 s"), float("-inf"))
-    compress_score = None
+        scores = torch.einsum("bthd,bshd->bhts", q, k)
+    compress_score = torch.softmax(scores, dim=-1).to(torch.float32)
+    scores *= scale
+    # if softcap > 0:
+    #     scores = scores / softcap
+    #     scores = scores.tanh()
+    #     scores = scores * softcap
+    # if key_padding_mask is not None:
+    #     scores.masked_fill_(rearrange(~key_padding_mask, "b s -> b 1 1 s"), float("-inf"))
     if window_size[0] >= 0 or window_size[1] >= 0:
         local_mask = construct_local_mask(
             seqlen_q,
@@ -122,7 +121,6 @@ def attention_ref(
             q.device,
             key_leftpad=key_leftpad,
         )
-        compress_score = torch.softmax(scores, dim=-1).to(torch.float32)
         scores.masked_fill_(local_mask, float("-inf"))
     if attn_bias is not None:
         scores = scores + attn_bias
