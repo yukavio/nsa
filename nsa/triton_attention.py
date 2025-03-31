@@ -9,17 +9,10 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
                     K_block_ptr, V_block_ptr,  #
                     start_m, qk_scale,  #
                     BLOCK_M: tl.constexpr, HEAD_DIM: tl.constexpr, BLOCK_N: tl.constexpr,  #
+                    block_stride: tl.constexpr, block_size: tl.constexpr,
                     STAGE: tl.constexpr, offs_m: tl.constexpr, offs_n: tl.constexpr,  #
                     N_CTX: tl.constexpr, fp8_v: tl.constexpr):
-    # range of values handled by this stage
-    if STAGE == 1:
-        lo, hi = 0, start_m * BLOCK_M
-    elif STAGE == 2:
-        lo, hi = start_m * BLOCK_M, (start_m + 1) * BLOCK_M
-        lo = tl.multiple_of(lo, BLOCK_M)
-    # causal = False
-    else:
-        lo, hi = 0, N_CTX
+    lo, hi = 0, N_CTX
     K_block_ptr = tl.advance(K_block_ptr, (0, lo))
     V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
     # loop over k, v and update accumulator
@@ -29,7 +22,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         k = tl.load(K_block_ptr)
         qk = tl.dot(q, k)
         if STAGE == 2:
-            mask = offs_m[:, None] >= (start_n + offs_n[None, :])
+            mask = offs_m[:, None] >= (start_n + offs_n[None, :])*block_stride+block_size
             qk = qk * qk_scale + tl.where(mask, 0, -1.0e6)
             m_ij = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_ij[:, None]
@@ -47,11 +40,12 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         v = tl.load(V_block_ptr)
 
         p = p.to(q.dtype)
-        tl.dot(p, v, acc)
+        acc += tl.dot(p, v)
         # update m_i and l_i
         m_i = m_ij
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
+    
     return acc, l_i, m_i
 
 
@@ -83,7 +77,9 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
               stride_kz, stride_kh, stride_kn, stride_kk,  #
               stride_vz, stride_vh, stride_vk, stride_vn,  #
               stride_oz, stride_oh, stride_om, stride_on,  #
-              Z, H, N_CTX,  #
+              Z, H, N_CTX, Q_CTX, #
+              block_stride: tl.constexpr,
+              block_size: tl.constexpr,
               HEAD_DIM: tl.constexpr,  #
               BLOCK_M: tl.constexpr,  #
               BLOCK_N: tl.constexpr,  #
@@ -94,12 +90,13 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     off_hz = tl.program_id(1)
     off_z = off_hz // H
     off_h = off_hz % H
-    qvk_offset = off_z.to(tl.int64) * stride_qz + off_h.to(tl.int64) * stride_qh
+    qo_offset = off_z.to(tl.int64) * stride_qz + off_h.to(tl.int64) * stride_qh
+    kv_offset = off_z.to(tl.int64) * stride_kz + off_h.to(tl.int64) * stride_kh
 
     # block pointers
     Q_block_ptr = tl.make_block_ptr(
-        base=Q + qvk_offset,
-        shape=(N_CTX, HEAD_DIM),
+        base=Q + qo_offset,
+        shape=(Q_CTX, HEAD_DIM),
         strides=(stride_qm, stride_qk),
         offsets=(start_m * BLOCK_M, 0),
         block_shape=(BLOCK_M, HEAD_DIM),
@@ -107,7 +104,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     )
     v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
     V_block_ptr = tl.make_block_ptr(
-        base=V + qvk_offset,
+        base=V + kv_offset,
         shape=(N_CTX, HEAD_DIM),
         strides=(stride_vk, stride_vn),
         offsets=(0, 0),
@@ -115,7 +112,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
         order=v_order,
     )
     K_block_ptr = tl.make_block_ptr(
-        base=K + qvk_offset,
+        base=K + kv_offset,
         shape=(HEAD_DIM, N_CTX),
         strides=(stride_kk, stride_kn),
         offsets=(0, 0),
@@ -123,8 +120,8 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
         order=(0, 1),
     )
     O_block_ptr = tl.make_block_ptr(
-        base=Out + qvk_offset,
-        shape=(N_CTX, HEAD_DIM),
+        base=Out + qo_offset,
+        shape=(Q_CTX, HEAD_DIM),
         strides=(stride_om, stride_on),
         offsets=(start_m * BLOCK_M, 0),
         block_shape=(BLOCK_M, HEAD_DIM),
@@ -142,15 +139,6 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     qk_scale *= 1.44269504  # 1/log(2)
     # load q: it will stay in SRAM throughout
     q = tl.load(Q_block_ptr)
-    # stage 1: off-band
-    # For causal = True, STAGE = 3 and _attn_fwd_inner gets 1 as its STAGE
-    # For causal = False, STAGE = 1, and _attn_fwd_inner gets 3 as its STAGE
-    if STAGE & 1:
-        acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,  #
-                                        start_m, qk_scale,  #
-                                        BLOCK_M, HEAD_DIM, BLOCK_N,  #
-                                        4 - STAGE, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5  #
-                                        )
     # stage 2: on-band
     if STAGE & 2:
         # barrier makes it easier for compielr to schedule the
@@ -158,6 +146,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,  #
                                         start_m, qk_scale,  #
                                         BLOCK_M, HEAD_DIM, BLOCK_N,  #
+                                        block_stride, block_size, #
                                         2, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5  #
                                         )
     # epilogue
@@ -166,21 +155,16 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     m_ptrs = M + off_hz * N_CTX + offs_m
     tl.store(m_ptrs, m_i)
     tl.store(O_block_ptr, acc.to(Out.type.element_ty))
-
-
-# We don't run auto-tuning every time to keep the tutorial fast. Keeping
-# the code below and commenting out the equivalent parameters is convenient for
-# re-tuning.
-configs_tma = [
-    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
-    for BM in [64, 128]\
-    for BN in [32, 64, 128]\
-    for s in [2, 3, 4, 6]\
-    for w in [4, 8]\
-]
-
-
-
+    if start_m == 0:
+        clear_block_ptr = tl.make_block_ptr(
+            base=Out + qo_offset,
+            shape=(Q_CTX, HEAD_DIM),
+            strides=(stride_om, stride_on),
+            offsets=(start_m * BLOCK_M, 0),
+            block_shape=(block_size, HEAD_DIM),
+            order=(1, 0),
+        )
+        tl.store(clear_block_ptr, tl.zeros([block_size, HEAD_DIM], dtype=Out.type.element_ty))
 
 
 @triton.jit
@@ -434,9 +418,10 @@ def _attn_bwd(Q, K, V, sm_scale,  #
 class _attention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, block_stride, block_size, causal, sm_scale):
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        # q = q.transpose(1, 2)
+        # k = k.transpose(1, 2)
+        # v = v.transpose(1, 2)
+        # B, T, H, D
 
         # shape constraints
         HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
@@ -452,16 +437,18 @@ class _attention(torch.autograd.Function):
 
         M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
 
-        grid = lambda args: (triton.cdiv(q.shape[2], args["BLOCK_M"]), q.shape[0] * q.shape[1], 1)
+        grid = lambda args: (triton.cdiv(q.shape[1], args["BLOCK_M"]), q.shape[0] * q.shape[2], 1)
         ctx.grid = grid
         _attn_fwd[grid](
             q, k, v, sm_scale, M, o,  #
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3),  #
-            v.stride(0), v.stride(1), v.stride(2), v.stride(3),  #
-            o.stride(0), o.stride(1), o.stride(2), o.stride(3),  #
-            q.shape[0], q.shape[1],  #
-            N_CTX=q.shape[2],  #
+            q.stride(0), q.stride(2), q.stride(1), q.stride(3),  #
+            k.stride(0), k.stride(2), k.stride(1), k.stride(3),  #
+            v.stride(0), v.stride(2), v.stride(1), v.stride(3),  #
+            o.stride(0), o.stride(2), o.stride(1), o.stride(3),  #
+            q.shape[0], q.shape[2],  #
+            N_CTX=k.shape[1], Q_CTX=q.shape[1],  #
+            block_stride=block_stride,
+            block_size=block_size,
             HEAD_DIM=HEAD_DIM_K,  #
             STAGE=stage,  #
             **extra_kern_args)
@@ -470,7 +457,11 @@ class _attention(torch.autograd.Function):
         ctx.sm_scale = sm_scale
         ctx.HEAD_DIM = HEAD_DIM_K
         ctx.causal = causal
-        return o
+
+        s = torch.einsum("bthd, bshd->bhts", q, k)
+        s = torch.nn.functional.softmax(s, dim=-1)
+
+        return o, s.to(torch.float32)
 
     @staticmethod
     def backward(ctx, do):
@@ -516,56 +507,3 @@ class _attention(torch.autograd.Function):
 
 
 flash_attn_func = _attention.apply
-
-# class FlashAttnFunc(torch.autograd.Function):
-#     @staticmethod
-#     def forward(ctx, q, k, v, block_stride, block_size, bias=None, causal=False, softmax_scale=None):
-#         """
-#         q: (batch_size, seqlen_q, nheads, headdim)
-#         k, v: (batch_size, seqlen_k, nheads, headdim)
-#         bias: optional, shape broadcastible to (batch, nheads, seqlen_q, seqlen_k).
-#             For example, ALiBi mask for causal would have shape (1, nheads, 1, seqlen_k).
-#             ALiBi mask for non-causal would have shape (1, nheads, seqlen_q, seqlen_k)
-#         """
-#         # Make sure that the last dimension is contiguous
-#         q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
-#         o, lse, ctx.softmax_scale = _flash_attn_forward(
-#             q, k, v, block_stride, block_size, bias=bias, causal=causal, softmax_scale=softmax_scale
-#         )
-#         ctx.save_for_backward(q, k, v, o, lse, bias)
-#         ctx.causal = causal
-#         ctx.block_stride = block_stride
-#         ctx.block_size = block_size
-
-#         s = torch.einsum("bthd, bshd->bhts", q, k)
-#         s = torch.nn.functional.softmax(s, dim=-1)
-#         return o, s.to(torch.float32)
-
-#     @staticmethod
-#     def backward(ctx, do, s):
-#         q, k, v, o, lse, bias = ctx.saved_tensors
-#         assert not ctx.needs_input_grad[3], "FlashAttention does not support bias gradient yet"
-#         # Triton's autotune causes the Tensor._version to change, and so Pytorch autograd
-#         # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
-#         with torch.inference_mode():
-#             dq = torch.zeros_like(q)
-#             dk = torch.empty_like(k)
-#             dv = torch.empty_like(v)
-#             _flash_attn_backward(
-#                 do,
-#                 q,
-#                 k,
-#                 v,
-#                 o,
-#                 lse,
-#                 dq,
-#                 dk,
-#                 dv,
-#                 block_stride=ctx.block_stride,
-#                 block_size=ctx.block_size,
-#                 bias=bias,
-#                 causal=ctx.causal,
-#                 softmax_scale=ctx.softmax_scale,
-#             )
-#         return dq, dk, dv, None, None, None, None, None
-
