@@ -249,6 +249,7 @@ def _attn_bwd_dq(dq, q, K, V,  #
                  HEAD_DIM: tl.constexpr,
                  # Filled in by the wrapper.
                  start_m, start_n, num_steps,  #
+                 block_stride, block_size,
                  MASK: tl.constexpr):
     offs_m = start_m + tl.arange(0, BLOCK_M2)
     offs_n = start_n + tl.arange(0, BLOCK_N2)
@@ -269,7 +270,7 @@ def _attn_bwd_dq(dq, q, K, V,  #
         # Autoregressive masking.
         if MASK:
             offs_n = curr_n + tl.arange(0, BLOCK_N2)
-            mask = (offs_m[:, None] >= offs_n[None, :])
+            mask = (offs_m[:, None] >= offs_n[None, :] * block_stride + block_size)
             p = tl.where(mask, p, 0.0)
         # Compute dP and dS.
         dp = tl.dot(do, vT).to(tl.float32)
@@ -277,7 +278,7 @@ def _attn_bwd_dq(dq, q, K, V,  #
         ds = ds.to(q.dtype)
         # Compute dQ.
         # NOTE: We need to de-scale dq in the end, because kT was pre-scaled.
-        tl.dot(ds, tl.trans(kT), dq)
+        dq += tl.dot(ds, tl.trans(kT))
         # Increment pointers.
         curr_n += step_n
         kT_ptrs += step_n * stride_tok
@@ -285,20 +286,23 @@ def _attn_bwd_dq(dq, q, K, V,  #
     return dq
 
 
+
 @triton.jit
 def _attn_bwd(Q, K, V, sm_scale,  #
-              DO,  #
-              DQ, DK, DV,  #
-              M, D,
-              # shared by Q/K/V/DO.
-              stride_z, stride_h, stride_tok, stride_d,  #
-              H, N_CTX,  #
-              BLOCK_M1: tl.constexpr,  #
-              BLOCK_N1: tl.constexpr,  #
-              BLOCK_M2: tl.constexpr,  #
-              BLOCK_N2: tl.constexpr,  #
-              BLK_SLICE_FACTOR: tl.constexpr,  #
-              HEAD_DIM: tl.constexpr):
+                DO,  #
+                DQ, DK, DV,  #
+                M, D,
+                # shared by Q/K/V/DO.
+                stride_z, stride_h, stride_tok, stride_d,  #
+                H, N_CTX,  #
+                BLOCK_M1: tl.constexpr,  #
+                BLOCK_N1: tl.constexpr,  #
+                BLOCK_M2: tl.constexpr,  #
+                BLOCK_N2: tl.constexpr,  #
+                BLK_SLICE_FACTOR: tl.constexpr,  #
+                block_stride: tl.constexpr, 
+                block_size: tl.constexpr,
+                HEAD_DIM: tl.constexpr):
     LN2: tl.constexpr = 0.6931471824645996  # = ln(2)
 
     bhid = tl.program_id(2)
@@ -396,6 +400,8 @@ def _attn_bwd(Q, K, V, sm_scale,  #
                       H, N_CTX,  #
                       BLOCK_M2, MASK_BLOCK_N2, HEAD_DIM,  #
                       start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps,  #
+                      block_stride=block_stride,
+                      block_size=block_size,
                       MASK=True  #
                       )
     end_n -= num_steps * MASK_BLOCK_N2
@@ -407,6 +413,8 @@ def _attn_bwd(Q, K, V, sm_scale,  #
                       H, N_CTX,  #
                       BLOCK_M2, BLOCK_N2, HEAD_DIM,  #
                       start_m, end_n - num_steps * BLOCK_N2, num_steps,  #
+                      block_stride=block_stride,
+                      block_size=block_size,
                       MASK=False  #
                       )
     # Write back dQ.
@@ -464,14 +472,14 @@ class _attention(torch.autograd.Function):
         return o, s.to(torch.float32)
 
     @staticmethod
-    def backward(ctx, do):
+    def backward(ctx, do, ds):
         q, k, v, o, M = ctx.saved_tensors
         assert do.is_contiguous()
         assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
         dq = torch.empty_like(q)
         dk = torch.empty_like(k)
         dv = torch.empty_like(v)
-        BATCH, N_HEAD, N_CTX = q.shape[:3]
+        BATCH, N_CTX, N_HEAD = q.shape[:3]
         PRE_BLOCK = 128
         NUM_WARPS, NUM_STAGES = 4, 5
         BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 128, 128, 32
@@ -493,17 +501,19 @@ class _attention(torch.autograd.Function):
         _attn_bwd[grid](
             q, arg_k, v, ctx.sm_scale, do, dq, dk, dv,  #
             M, delta,  #
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
+            q.stride(0), q.stride(2), q.stride(1), q.stride(3),  #
             N_HEAD, N_CTX,  #
             BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1,  #
             BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2,  #
             BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,  #
             HEAD_DIM=ctx.HEAD_DIM,  #
+            block_stride=ctx.block_stride,  
+            block_size=ctx.block_size,    
             num_warps=NUM_WARPS,  #
             num_stages=NUM_STAGES  #
         )
 
-        return dq, dk, dv, None, None
+        return dq, dk, dv, None, None, None, None
 
 
 flash_attn_func = _attention.apply
