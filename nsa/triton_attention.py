@@ -243,6 +243,7 @@ def _attn_bwd_dq(dq, q, K, V,  #
                  do, m, D,
                  # shared by Q/K/V/DO.
                  stride_tok, stride_d,  #
+                 stride_k,
                  H, N_CTX,  #
                  BLOCK_M2: tl.constexpr,  #
                  BLOCK_N2: tl.constexpr,  #
@@ -254,8 +255,8 @@ def _attn_bwd_dq(dq, q, K, V,  #
     offs_m = start_m + tl.arange(0, BLOCK_M2)
     offs_n = start_n + tl.arange(0, BLOCK_N2)
     offs_k = tl.arange(0, HEAD_DIM)
-    kT_ptrs = K + offs_n[None, :] * stride_tok + offs_k[:, None] * stride_d
-    vT_ptrs = V + offs_n[None, :] * stride_tok + offs_k[:, None] * stride_d
+    kT_ptrs = K + offs_n[None, :] * stride_k + offs_k[:, None] * stride_d
+    vT_ptrs = V + offs_n[None, :] * stride_k + offs_k[:, None] * stride_d
     # D (= delta) is pre-divided by ds_scale.
     Di = tl.load(D + offs_m)
     # BLOCK_M2 must be a multiple of BLOCK_N2, otherwise the code wouldn't work.
@@ -294,6 +295,7 @@ def _attn_bwd(Q, K, V, sm_scale,  #
                 M, D,
                 # shared by Q/K/V/DO.
                 stride_z, stride_h, stride_tok, stride_d,  #
+                stride_k,
                 H, N_CTX,  #
                 BLOCK_M1: tl.constexpr,  #
                 BLOCK_N1: tl.constexpr,  #
@@ -410,6 +412,7 @@ def _attn_bwd(Q, K, V, sm_scale,  #
     dq = _attn_bwd_dq(dq, q, K, V,  #
                       do, m, D,  #
                       stride_tok, stride_d,  #
+                      stride_k,
                       H, N_CTX,  #
                       BLOCK_M2, BLOCK_N2, HEAD_DIM,  #
                       start_m, end_n - num_steps * BLOCK_N2, num_steps,  #
@@ -502,6 +505,7 @@ class _attention(torch.autograd.Function):
             q, arg_k, v, ctx.sm_scale, do, dq, dk, dv,  #
             M, delta,  #
             q.stride(0), q.stride(2), q.stride(1), q.stride(3),  #
+            k.stride(1),
             N_HEAD, N_CTX,  #
             BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1,  #
             BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2,  #
