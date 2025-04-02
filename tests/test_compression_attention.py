@@ -104,4 +104,5 @@ def test_no_causal():
     torch.testing.assert_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
     torch.testing.assert_close(s, ref_s, rtol=1e-2, atol=1e-2)
 
-test_no_causal
+test_no_causal()
+print("no causal test passed!")
