@@ -55,8 +55,8 @@ torch.testing.assert_close(o, ref_o, rtol=1e-2, atol=1e-2)
 loss = (o*o).sum()
 loss.backward()
 
-print(q.grad)
-print(q_ref.grad)
+# print(q.grad)
+# print(q_ref.grad)
 
 torch.testing.assert_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
 
