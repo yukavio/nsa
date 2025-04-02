@@ -38,6 +38,7 @@ q_ref_t = q_ref.reshape(bs, seq_len, num_q_head, head_dim)
 
 
 
+test_no_causal()
 
 compressor = KVCompressor(
             compress_block_stride, compress_block_size, head_dim, device, dtype
@@ -46,11 +47,11 @@ compressor = KVCompressor(
 ck, cv, compress_cu_kv_len = compressor(k, v, t, num_q_head//k.shape[1])
 ck_ref, cv_ref, compress_cu_kv_len = compressor(k_ref, v_ref, t, num_q_head//k.shape[1])
 
-ref_o, ref_s = attention_ref(q_ref_t, ck_ref, cv_ref, compress_block_stride, compress_block_size, causal=False, scale=None)
+ref_o, ref_s = attention_ref(q_ref_t, ck_ref, cv_ref, compress_block_stride, compress_block_size, causal=True, scale=None)
 ref_loss = (ref_o*ref_o).sum()
 ref_loss.backward()
 
-o, s = flash_attn_func(q_t, ck, cv, compress_block_stride, compress_block_size, False, None)
+o, s = flash_attn_func(q_t, ck, cv, compress_block_stride, compress_block_size, True, None)
 torch.testing.assert_close(o, ref_o, rtol=1e-2, atol=1e-2)
 loss = (o*o).sum()
 loss.backward()
@@ -58,7 +59,7 @@ loss.backward()
 print(q.grad)
 print(q_ref.grad)
 
-# torch.testing.assert_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
+torch.testing.assert_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
 
 
 
@@ -83,4 +84,3 @@ def test_no_causal():
     torch.testing.assert_close(k.grad, k_ref.grad, rtol=3e-2, atol=3e-2)
     torch.testing.assert_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
     torch.testing.assert_close(s, ref_s, rtol=1e-2, atol=1e-2)
-test_no_causal()
