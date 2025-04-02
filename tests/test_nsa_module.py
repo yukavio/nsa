@@ -3,9 +3,6 @@ import torch
 from nsa import selection_attention
 from nsa.nsa import NSAAttention
 
-# from nsa.nsa import CompressionAttn
-from nsa.torch_attention import attention_ref as attn_func
-from nsa.torch_attention import torch_attntion
 
 torch.manual_seed(10)
 
@@ -33,6 +30,7 @@ assert not torch.isnan(o).any(), 'forward output has nan.'
 loss = o.sum()
 loss.backward()
 
+print(k.grad)
 
 assert not torch.isnan(q.grad).any(), 'q.grad output has nan.'
 assert not torch.isnan(k.grad).any(), 'k.grad output has nan.'

@@ -36,8 +36,9 @@ def construct_local_mask(
         if query_padding_mask is None
         else rearrange(query_padding_mask.sum(-1), "b -> b 1 1 1")
     )
+
     if window_size[0] < 0:
-        return col_idx * block_stride + block_size > row_idx + window_size[1]
+        return col_idx * block_stride + block_size > row_idx
     else:
         sk = torch.full_like(col_idx, seqlen_k) if key_padding_mask is None else sk
         mask = torch.logical_or(
@@ -98,11 +99,11 @@ def attention_ref(
     if scale is None:
         scale = 1 / math.sqrt(d)
     if not reorder_ops:
-        scores = torch.einsum("bthd,bshd->bhts", q, k)
+        qk = torch.einsum("bthd,bshd->bhts", q, k)
     else:
-        scores = torch.einsum("bthd,bshd->bhts", q, k)
-    compress_score = torch.softmax(scores, dim=-1).to(torch.float32)
-    scores *= scale
+        qk = torch.einsum("bthd,bshd->bhts", q, k)
+    compress_score = torch.softmax(qk, dim=-1).to(torch.float32)
+    scores = qk * scale
 
     if window_size[0] >= 0 or window_size[1] >= 0:
         local_mask = construct_local_mask(
@@ -120,15 +121,15 @@ def attention_ref(
             scores.masked_fill_(local_mask, float("-inf"))
     if attn_bias is not None:
         scores = scores + attn_bias
-    attention = torch.softmax(scores, dim=-1).to(v.dtype)
+    # scores.retain_grad()
+    attention_without_mask = torch.softmax(scores, dim=-1).to(v.dtype)
     # Some rows might be completely masked out so we fill them with zero instead of NaN
     if (window_size[0] >= 0 or window_size[1] >= 0) and causal:
-        attention = attention.masked_fill(torch.all(local_mask, dim=-1, keepdim=True), 0.0)
+        attention = attention_without_mask.masked_fill(torch.all(local_mask, dim=-1, keepdim=True), 0.0)
+    else:
+        attention = attention_without_mask
 
-    # We want to mask here so that the attention matrix doesn't have any NaNs
-    # Otherwise we'll get NaN in dV
-    if query_padding_mask is not None:
-        attention = attention.masked_fill(rearrange(~query_padding_mask, "b s -> b 1 s 1"), 0.0)
+    # attention_without_mask.retain_grad()
     dropout_scaling = 1.0 / (1 - dropout_p)
     # attention_drop = attention.masked_fill(~dropout_mask, 0.0) * dropout_scaling
     # output = torch.einsum('bhts,bshd->bthd', attention_drop , v)
