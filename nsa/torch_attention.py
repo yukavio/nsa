@@ -103,12 +103,7 @@ def attention_ref(
         scores = torch.einsum("bthd,bshd->bhts", q, k)
     compress_score = torch.softmax(scores, dim=-1).to(torch.float32)
     scores *= scale
-    # if softcap > 0:
-    #     scores = scores / softcap
-    #     scores = scores.tanh()
-    #     scores = scores * softcap
-    # if key_padding_mask is not None:
-    #     scores.masked_fill_(rearrange(~key_padding_mask, "b s -> b 1 1 s"), float("-inf"))
+
     if window_size[0] >= 0 or window_size[1] >= 0:
         local_mask = construct_local_mask(
             seqlen_q,
@@ -121,13 +116,15 @@ def attention_ref(
             q.device,
             key_leftpad=key_leftpad,
         )
-        scores.masked_fill_(local_mask, float("-inf"))
+        if causal:
+            scores.masked_fill_(local_mask, float("-inf"))
     if attn_bias is not None:
         scores = scores + attn_bias
     attention = torch.softmax(scores, dim=-1).to(v.dtype)
     # Some rows might be completely masked out so we fill them with zero instead of NaN
-    if window_size[0] >= 0 or window_size[1] >= 0:
+    if (window_size[0] >= 0 or window_size[1] >= 0) and causal:
         attention = attention.masked_fill(torch.all(local_mask, dim=-1, keepdim=True), 0.0)
+
     # We want to mask here so that the attention matrix doesn't have any NaNs
     # Otherwise we'll get NaN in dV
     if query_padding_mask is not None:
@@ -144,52 +141,4 @@ def attention_ref(
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
     return output.to(dtype=dtype_og), compress_score
 
-
-def torch_attntion(
-    q,
-    k,
-    v,
-    block_stride, 
-    block_size,
-    query_padding_mask=None,
-    key_padding_mask=None,
-    attn_bias=None,
-    dropout_p=0.0,
-    dropout_mask=None,
-    causal=False,
-    window_size=(-1, -1),  # -1 means infinite window size
-    softcap=0.0,
-    upcast=True,
-    reorder_ops=False,
-    key_leftpad=None,
-    scale=None
-):
-    bs, seqlen_q, seqlen_k = *q.shape[:2], k.shape[1]
-    with torch.no_grad():
-        local_mask = construct_local_mask(
-                seqlen_q,
-                seqlen_k,
-                block_stride,
-                block_size,
-                window_size,
-                query_padding_mask,
-                key_padding_mask,
-                q.device,
-                key_leftpad=key_leftpad,
-            )
-    local_mask = local_mask.unsqueeze(0).repeat([bs, 1, 1])
-    q = q.transpose(1, 2) # b, h, t, d
-    k = k.transpose(1, 2)
-    v = v.transpose(1, 2)
-    local_mask = local_mask.unsqueeze(1)
-
-    with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
-        o = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
-            attn_mask=local_mask, dropout_p=dropout_p, scale=scale, enable_gqa=True)
-    
-    with torch.no_grad():
-        k = repeat(k, "b h s d -> b (h g) s d", g=q.shape[1] // k.shape[1])
-        s = torch.einsum("bhtd, bhsd->bhts", q, k)
-        s = torch.nn.functional.softmax(s, dim=-1)
-    return o.transpose(1, 2), s
 
