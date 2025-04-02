@@ -397,9 +397,6 @@ def _attn_bwd_only_dkv(Q, K, V, sm_scale,  #
               H, Q_CTX, KV_CTX,  #
               BLOCK_M1: tl.constexpr,  #
               BLOCK_N1: tl.constexpr,  #
-              BLOCK_M2: tl.constexpr,  #
-              BLOCK_N2: tl.constexpr,  #
-              BLK_SLICE_FACTOR: tl.constexpr,  #
               HEAD_DIM: tl.constexpr):
 
     bid = tl.program_id(1)
@@ -437,17 +434,43 @@ def _attn_bwd_only_dkv(Q, K, V, sm_scale,  #
     num_steps = Q_CTX  // BLOCK_M1
 
     # Compute dK and dV for non-masked blocks.
-    dk, dv = _attn_bwd_dkdv(  #
-        dk, dv,  #
-        Q, k, v, sm_scale,  #
-        DO,  #
-        M, D,  #
-        stride_tok, stride_d,  #
-        H, KV_CTX,  #
-        BLOCK_M1, BLOCK_N1, HEAD_DIM,  #
-        start_n, start_m, num_steps,  #
-        MASK=False  #
-    )
+    MASK=False
+    offs_m = start_m + tl.arange(0, BLOCK_M1)
+    offs_n = start_n + tl.arange(0, BLOCK_N1)
+    offs_k = tl.arange(0, HEAD_DIM)
+    qT_ptrs = Q + offs_m[None, :] * stride_tok + offs_k[:, None] * stride_d
+    do_ptrs = DO + offs_m[:, None] * stride_tok + offs_k[None, :] * stride_d
+    # BLOCK_N1 must be a multiple of BLOCK_M1, otherwise the code wouldn't work.
+    tl.static_assert(BLOCK_N1 % BLOCK_M1 == 0)
+    curr_m = start_m
+    step_m = BLOCK_M1
+    for blk_idx in range(num_steps):
+        qT = tl.load(qT_ptrs)
+        # Load m before computing qk to reduce pipeline stall.
+        offs_m = curr_m + tl.arange(0, BLOCK_M1)
+        m = tl.load(M + offs_m*H)
+        qkT = tl.dot(k, qT)
+        pT = tl.math.exp2(qkT - m[None, :])
+        # Autoregressive masking.
+        if MASK:
+            mask = (offs_m[None, :] >= offs_n[:, None])
+            pT = tl.where(mask, pT, 0.0)
+        do = tl.load(do_ptrs).to(dk.dtype)
+        # Compute dV.
+        ppT = pT
+        ppT = ppT.to(dk.dtype)
+        dv += tl.dot(ppT, do)
+        # D (= delta) is pre-divided by ds_scale.
+        Di = tl.load(D + offs_m*H)
+        # Compute dP and dS.
+        dpT = tl.dot(v.to(do.dtype), tl.trans(do)).to(tl.float32)
+        dsT = pT * (dpT - Di[None, :])
+        dsT = dsT.to(dk.dtype)
+        dk += tl.dot(dsT.to(qT.dtype), tl.trans(qT))
+        # Increment pointers.
+        curr_m += step_m
+        qT_ptrs += step_m * stride_tok
+        do_ptrs += step_m * stride_tok
 
     dv_ptrs = DV + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d
     tl.store(dv_ptrs, dv)
@@ -465,13 +488,9 @@ def _attn_bwd_only_dq(Q, K, V, sm_scale,  #
               M, D,
               # shared by Q/K/V/DO.
               stride_z, stride_h, stride_tok, stride_d,  #
-              stride_kz, stride_kh, stride_ktok, stride_kd, #
               H, Q_CTX, KV_CTX,  #
-              BLOCK_M1: tl.constexpr,  #
-              BLOCK_N1: tl.constexpr,  #
               BLOCK_M2: tl.constexpr,  #
               BLOCK_N2: tl.constexpr,  #
-              BLK_SLICE_FACTOR: tl.constexpr,  #
               HEAD_DIM: tl.constexpr):
     LN2: tl.constexpr = 0.6931471824645996  # = ln(2)
 
@@ -512,14 +531,41 @@ def _attn_bwd_only_dq(Q, K, V, sm_scale,  #
 
     # stage 2
     num_steps = end_n // BLOCK_N2
-    dq = _attn_bwd_dq(dq, q, K, V,  #
-                      do, m, D,  #
-                      stride_tok, stride_d,  #
-                      H, Q_CTX,  #
-                      BLOCK_M2, BLOCK_N2, HEAD_DIM,  #
-                      start_m, 0, num_steps,  #
-                      MASK=False  #
-                      )
+    start_n = 0
+    MASK = False
+    offs_m = start_m + tl.arange(0, BLOCK_M2)
+    offs_n = start_n + tl.arange(0, BLOCK_N2)
+    offs_k = tl.arange(0, HEAD_DIM)
+    kT_ptrs = K + offs_n[None, :] * stride_tok + offs_k[:, None] * stride_d
+    vT_ptrs = V + offs_n[None, :] * stride_tok + offs_k[:, None] * stride_d
+    # D (= delta) is pre-divided by ds_scale.
+    Di = tl.load(D + offs_m*H)
+    # BLOCK_M2 must be a multiple of BLOCK_N2, otherwise the code wouldn't work.
+    tl.static_assert(BLOCK_M2 % BLOCK_N2 == 0)
+    curr_n = start_n
+    step_n = BLOCK_N2
+    for blk_idx in range(num_steps):
+        kT = tl.load(kT_ptrs)
+        vT = tl.load(vT_ptrs)
+        qk = tl.dot(q, kT)
+        p = tl.math.exp2(qk - m)
+        # Autoregressive masking.
+        if MASK:
+            offs_n = curr_n + tl.arange(0, BLOCK_N2)
+            mask = (offs_m[:, None] >= offs_n[None, :])
+            p = tl.where(mask, p, 0.0)
+        # Compute dP and dS.
+        dp = tl.dot(do, vT).to(tl.float32)
+        ds = p * (dp - Di[:, None])
+        ds = ds.to(q.dtype)
+        # Compute dQ.
+        # NOTE: We need to de-scale dq in the end, because kT was pre-scaled.
+        dq += tl.dot(ds, tl.trans(kT))
+        # Increment pointers.
+        curr_n += step_n
+        kT_ptrs += step_n * stride_tok
+        vT_ptrs += step_n * stride_tok
+
     # Write back dQ.
     dq_ptrs = DQ + offs_m[:, None] * stride_tok + offs_k[None, :] * stride_d
     dq *= LN2
@@ -621,8 +667,6 @@ class _attention(torch.autograd.Function):
             k.stride(0), k.stride(2), k.stride(1), k.stride(3), #
             Q_HEAD, Q_CTX, KV_CTX, #
             BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1,  #
-            BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2,  #
-            BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,  #
             HEAD_DIM=ctx.HEAD_DIM,  #
             num_warps=NUM_WARPS,  #
             num_stages=NUM_STAGES  #
@@ -632,11 +676,8 @@ class _attention(torch.autograd.Function):
             q, arg_k, v, ctx.sm_scale, do, dq, dk, dv,  #
             M, delta,  #
             q.stride(0), q.stride(2), q.stride(1), q.stride(3),  #
-            k.stride(0), k.stride(2), k.stride(1), k.stride(3), #
             Q_HEAD, Q_CTX, KV_CTX, #
-            BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1,  #
             BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2,  #
-            BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,  #
             HEAD_DIM=ctx.HEAD_DIM,  #
             num_warps=NUM_WARPS,  #
             num_stages=NUM_STAGES  #
