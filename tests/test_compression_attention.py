@@ -8,7 +8,7 @@ from nsa.compression_kv import KVCompressor
 bs, num_q_head, num_kv_head, head_dim = 1, 4, 4, 128
 compress_block_size, compress_block_stride = 64, 16
 selection_block, selected_block_count = 64, 32
-seq_len = 1024*32
+seq_len = 1024*16
 
 
 
