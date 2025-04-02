@@ -38,7 +38,6 @@ q_ref_t = q_ref.reshape(bs, seq_len, num_q_head, head_dim)
 
 
 
-test_no_causal()
 
 compressor = KVCompressor(
             compress_block_stride, compress_block_size, head_dim, device, dtype
