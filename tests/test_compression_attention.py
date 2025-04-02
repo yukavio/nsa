@@ -8,7 +8,7 @@ from nsa.compression_kv import KVCompressor
 bs, num_q_head, num_kv_head, head_dim = 1, 4, 4, 128
 compress_block_size, compress_block_stride = 64, 16
 selection_block, selected_block_count = 64, 32
-seq_len = 1024*16
+seq_len = 1024*32
 
 
 
@@ -66,14 +66,16 @@ ref_loss.backward()
 
 
 o, s = flash_attn_func(q_t, k_t, v_t, compress_block_stride, compress_block_size, False, None)
-# torch.testing.assert_close(o, ref_o, rtol=1e-2, atol=1e-2)
+torch.testing.assert_close(o, ref_o, rtol=1e-2, atol=1e-2)
 loss = (o*o).sum()
 loss.backward()
 
 
-print(q.grad)
-print(q_ref.grad)
+# print(q.grad)
+# print(q_ref.grad)
 
 
-# torch.testing.assert_close(s, ref_s, rtol=1e-2, atol=1e-2)
+torch.testing.assert_close(q.grad, q_ref.grad, rtol=1e-2, atol=1e-2)
+torch.testing.assert_close(k.grad, k_ref.grad, rtol=1e-2, atol=1e-2)
+torch.testing.assert_close(v.grad, v_ref.grad, rtol=1e-2, atol=1e-2)
 
