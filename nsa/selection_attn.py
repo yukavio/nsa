@@ -210,13 +210,15 @@ def parallel_nsa_bwd_kernel_dkv(q, k, v, lse_slc, lse_swa, delta_slc, delta_swa,
             b_p_slc = tl.exp(b_s_slc - b_lse_slc[None, :])
             b_p_slc = tl.where((i >= (i_s * BS + tl.arange(0, BS)))[:, None], b_p_slc, 0)
             # [BS, G] @ [G, BV] -> [BS, BV]
-            tl.dot(b_p_slc.to(b_do_slc.dtype), b_do_slc, b_dv)
+            b_dv += tl.dot(b_p_slc.to(b_do_slc.dtype), b_do_slc)
+            # tl.dot(b_p_slc.to(b_do_slc.dtype), b_do_slc, b_dv)
             # [BS, BV] @ [BV, G] -> [BS, G]
             b_dp_slc = tl.dot(b_v, tl.trans(b_do_slc))
             # [BS, G]
             b_ds_slc = b_p_slc * (b_dp_slc - b_delta_slc[None, :])
             # [BS, G] @ [G, BK] -> [BS, BK]
-            tl.dot(b_ds_slc.to(b_q.dtype), b_q, b_dk)
+            b_dk += tl.dot(b_ds_slc.to(b_q.dtype), b_q)
+            # tl.dot(b_ds_slc.to(b_q.dtype), b_q, b_dk)
 
         if WS > 0:
             o_s = i_s * BS + tl.arange(0, BS)
@@ -241,13 +243,15 @@ def parallel_nsa_bwd_kernel_dkv(q, k, v, lse_slc, lse_swa, delta_slc, delta_swa,
                 b_p_swa = tl.exp(b_s_swa - b_lse_swa[None, :])
                 b_p_swa = tl.where((i >= o_s and (i - WS) < o_s)[:, None], b_p_swa, 0)
                 # [BS, G] @ [G, BV] -> [BS, BV]
-                tl.dot(b_p_swa.to(b_do_swa.dtype), b_do_swa, b_dv)
+                bdv += tl.dot(b_p_swa.to(b_do_swa.dtype), b_do_swa)
+                # tl.dot(b_p_swa.to(b_do_swa.dtype), b_do_swa, b_dv)
                 # [BS, BV] @ [BV, G] -> [BS, G]
                 b_dp_swa = tl.dot(b_v, tl.trans(b_do_swa))
                 # [BS, G]
                 b_ds_swa = b_p_swa * (b_dp_swa - b_delta_swa[None, :])
                 # [BS, G] @ [G, BK] -> [BS, BK]
-                tl.dot(b_ds_swa.to(b_q.dtype), b_q, b_dk)
+                b_dk += tl.dot(b_ds_swa.to(b_q.dtype), b_q)
+                # tl.dot(b_ds_swa.to(b_q.dtype), b_q, b_dk)
 
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))

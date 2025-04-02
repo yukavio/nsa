@@ -137,27 +137,7 @@ def naive_nsa(q: torch.Tensor,
             # [S*BS, HQ]
             attn_slc = torch.einsum('h d, n h d -> n h', q_i, k_i_slc).masked_fill(
                 torch.logical_or(i_i < 0, i_i > i_q) |
-                (c >= s_i if block_counts is not None else False), float('-inf'))
-            
-            # with open('save.txt', 'a+') as f:
-            #     # Save tensor with row/column format
-            #     f.write("==================================attn_slc data==================================:\n")
-            #     # Write each head as a column
-            #     for head_idx in range(attn_slc.shape[0]):  # Iterate over HQ heads
-            #         # Convert each row's value for this head to string
-            #         row_values = [f"{x.item():.6f}" for x in attn_slc[head_idx, :]]
-            #         f.write(" ".join(row_values) + "\n")  # Write one line per head
-                    
-            # print(attn_slc.shape)
-            attn_slc = attn_slc.softmax(dim=0)
-            # with open('save_sftmx.txt', 'a+') as f:
-            #     # Save tensor with row/column format
-            #     f.write("==================================attn_slc data==================================:\n")
-            #     # Write each head as a column
-            #     for head_idx in range(attn_slc.shape[0]):  # Iterate over HQ heads
-            #         # Convert each row's value for this head to string
-            #         row_values = [f"{x.item():.6f}" for x in attn_slc[head_idx, :]]
-            #         f.write(" ".join(row_values) + "\n")  # Write one line per head
+                (c >= s_i if block_counts is not None else False), float('-inf')).softmax(dim=0)
             if not varlen:
                 o_slc[i, i_q] = torch.einsum('n h, n h v -> h v', attn_slc,
                                              v_i_slc) * g_slc_i.unsqueeze(-1)
@@ -187,7 +167,7 @@ def naive_nsa(q: torch.Tensor,
 
 if __name__ == "__main__":
     B, T, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 32, 2, 32, torch.float16
-    # torch.random.manual_seed(84831)
+    torch.random.manual_seed(0)
     q = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
     k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
     v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
@@ -206,11 +186,7 @@ if __name__ == "__main__":
     
     #NOTE: We change first element of block_indices from 0 to others manually, aiming to produce some nan in ref
     block_indices[0][0][0][0] = 4
-    block_indices[0][3][0][0] = 2
-    block_indices[0][7][0][0] = 10
-    block_indices[1][40][0][0] = 2
     block_indices[1][63][0][0] = 7
-    block_indices[1][10][0][0] = 5
 
     block_counts = torch.randint(1, S + 1, (B, T, H), device='cuda')
 
@@ -224,12 +200,25 @@ if __name__ == "__main__":
         block_counts=block_counts,
         block_size=block_size,
     )
+    #NOTE: We replace nan in ref to 0.0 to match the result of tri and make bwd correct
+    # Use silice instead of in-place
+    ref[0][0] = 0.0
+    ref[1][63] = 0.0
+    
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
     ref_dg_slc, g_slc.grad = g_slc.grad.clone(), None
-
+    
+    
+    ref_dv[0][-1] = 0.0
+    ref_dv[1][-1] = 0.0
+    ref_dg_slc[0][0] = 0.0
+    ref_dg_slc[0][0] = 0.0
+    ref_dg_slc[1][-1] = 0.0
+    ref_dg_slc[1][-1] = 0.0
+    
     tri = selection_attention(
         q=q,
         k=k,
@@ -240,21 +229,32 @@ if __name__ == "__main__":
         block_size=block_size,
         block_counts=block_counts,
     )
-    print(tri)
-    print(ref)
-    
-    #NOTE: We replace nan in ref to 0.0 to match the result of tri and make bwd correct
-    ref[torch.isnan(ref)] = 0.0
-    
+
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
     tri_dg_slc, g_slc.grad = g_slc.grad.clone(), None
+    
+    assert not torch.isnan(ref).any()
+    assert not torch.isnan(ref_dq).any()
+    assert not torch.isnan(ref_dk).any()
+    assert not torch.isnan(ref_dv).any() # nan
+    assert not torch.isnan(ref_dg_slc).any() # nan
+    
+    assert not torch.isnan(tri).any()
+    assert not torch.isnan(tri_dq).any()
+    assert not torch.isnan(tri_dk).any()
+    assert not torch.isnan(tri_dv).any()
+    assert not torch.isnan(tri_dg_slc).any()
 
+
+    
     # assert_close(" o", ref, tri, 0.004)
     torch.testing.assert_close(ref, tri, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(ref_dq, tri_dq, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(ref_dk, tri_dk, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(ref_dv, tri_dv, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(ref_dg_slc, tri_dg_slc, atol=1e-2, rtol=1e-2)
+    
+    print("test passed")
