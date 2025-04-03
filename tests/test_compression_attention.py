@@ -6,9 +6,8 @@ from nsa.compression_kv import KVCompressor
 from copy import deepcopy
 
 
-bs, num_q_head, num_kv_head, head_dim = 1, 1, 1, 128
 compress_block_size, compress_block_stride = 32, 16
-seq_len = 1024*16
+seq_len = 1024
 
 
 
@@ -18,7 +17,7 @@ torch.set_default_device(device)
 torch.set_default_dtype(dtype)
 torch.manual_seed(9)
 
-def create_data():
+def create_data(bs, num_q_head, num_kv_head, head_dim):
     q = torch.randn(bs*seq_len, num_q_head, head_dim, requires_grad=True)
     k = torch.randn(bs*seq_len, num_kv_head, head_dim, requires_grad=True)
     v = torch.randn(bs*seq_len, num_kv_head, head_dim, requires_grad=True)
@@ -38,7 +37,8 @@ def create_data():
 
 
 def test_no_causal():
-    q, k, v, q_ref, k_ref, v_ref, t = create_data()
+    bs, num_q_head, num_kv_head, head_dim = 2, 4, 4, 128
+    q, k, v, q_ref, k_ref, v_ref, t = create_data(bs, num_q_head, num_kv_head, head_dim)
     q_t = q.reshape(bs, seq_len, num_q_head, head_dim)
     q_ref_t = q_ref.reshape(bs, seq_len, num_q_head, head_dim)
     k_t = k.reshape(bs, seq_len, num_kv_head, head_dim)
@@ -65,7 +65,8 @@ test_no_causal()
 
 
 def test_causal():
-    q, k, v, q_ref, k_ref, v_ref, t = create_data()
+    bs, num_q_head, num_kv_head, head_dim = 1, 1, 1, 128
+    q, k, v, q_ref, k_ref, v_ref, t = create_data(bs, num_q_head, num_kv_head, head_dim)
     q_t = q.reshape(bs, seq_len, num_q_head, head_dim)
     q_ref_t = q_ref.reshape(bs, seq_len, num_q_head, head_dim)
 
@@ -83,12 +84,12 @@ def test_causal():
     ref_loss = (ref_o*ref_o).sum()
     ref_loss.backward()
 
-
     o, s = flash_attn_func(q_t, ck, cv, compress_block_stride, compress_block_size, True, None)
     torch.testing.assert_close(o, ref_o, rtol=1e-2, atol=1e-2)
     loss = (o*o).sum()
     loss.backward()
-
+    diff = (q.grad-q_ref.grad)/q_ref.grad
+    import pdb; pdb.set_trace()
     try:
         torch.testing.assert_close(v.grad, v_ref.grad, rtol=3e-2, atol=3e-2)
     except Exception as e:

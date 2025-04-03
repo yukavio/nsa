@@ -88,10 +88,10 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     tl.static_assert(BLOCK_N <= HEAD_DIM)
     start_m = tl.program_id(0)
     off_hz = tl.program_id(1)
-    off_z = off_hz // H
-    off_h = off_hz % H
-    qo_offset = off_z.to(tl.int64) * stride_qz + off_h.to(tl.int64) * stride_qh
-    kv_offset = off_z.to(tl.int64) * stride_kz + off_h.to(tl.int64) * stride_kh
+    off_z = (off_hz // H).to(tl.int64)
+    off_h = (off_hz % H).to(tl.int64)
+    qo_offset = off_z * stride_qz + off_h * stride_qh
+    kv_offset = off_z * stride_kz + off_h * stride_kh
 
     # block pointers
     Q_block_ptr = tl.make_block_ptr(
@@ -150,7 +150,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     # epilogue
     m_i += tl.math.log2(l_i)
     acc = acc / l_i[:, None]
-    m_ptrs = M + off_hz * N_CTX + offs_m
+    m_ptrs = M + off_z * Q_CTX * H + offs_m * H + off_h
     tl.store(m_ptrs, m_i)
     tl.store(O_block_ptr, acc.to(Out.type.element_ty))
     if start_m == 0 and STAGE==3:
@@ -237,7 +237,6 @@ def _attn_bwd_only_dkv(Q, K, V, sm_scale,  #
     num_steps = Q_CTX  // BLOCK_M1
 
     # Compute dK and dV for non-masked blocks.
-    MASK=False
     offs_m = start_m + tl.arange(0, BLOCK_M1)
     offs_n = start_n + tl.arange(0, BLOCK_N1)
     offs_k = tl.arange(0, HEAD_DIM)
@@ -432,8 +431,8 @@ class _attention(torch.autograd.Function):
         assert do.is_contiguous()
         assert q.stride() == o.stride() == do.stride()
         assert k.stride() == v.stride()
-        dq = torch.zeros_like(q)
-        dk = torch.empty_like(k)
+        dq = torch.empty_like(q)
+        dk = torch.zeros_like(k)
         dv = torch.empty_like(v)
         BATCH, Q_CTX, Q_HEAD = q.shape[:3]
         _, KV_CTX, KV_HEAD = k.shape[:3]
@@ -455,7 +454,7 @@ class _attention(torch.autograd.Function):
         )
 
         BLOCK_M_kv, BLOCK_N_kv = 64, 64
-        grid_kv = (triton.cdiv(KV_CTX, BLOCK_N_kv), BATCH, Q_HEAD)
+        grid_kv = (triton.cdiv(KV_CTX, BLOCK_N_kv), BATCH, KV_HEAD)
         _attn_bwd_only_dkv[grid_kv](
             q, arg_k, v, ctx.sm_scale, do, dq, dk, dv,  #
             M, delta,  #
