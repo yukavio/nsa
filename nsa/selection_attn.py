@@ -243,7 +243,7 @@ def parallel_nsa_bwd_kernel_dkv(q, k, v, lse_slc, lse_swa, delta_slc, delta_swa,
                 b_p_swa = tl.exp(b_s_swa - b_lse_swa[None, :])
                 b_p_swa = tl.where((i >= o_s and (i - WS) < o_s)[:, None], b_p_swa, 0)
                 # [BS, G] @ [G, BV] -> [BS, BV]
-                bdv += tl.dot(b_p_swa.to(b_do_swa.dtype), b_do_swa)
+                b_dv += tl.dot(b_p_swa.to(b_do_swa.dtype), b_do_swa)
                 # tl.dot(b_p_swa.to(b_do_swa.dtype), b_do_swa, b_dv)
                 # [BS, BV] @ [BV, G] -> [BS, G]
                 b_dp_swa = tl.dot(b_v, tl.trans(b_do_swa))
@@ -738,9 +738,6 @@ class ParallelNSAFunction(torch.autograd.Function):
             scale=ctx.scale,
             offsets=ctx.offsets,
             token_indices=ctx.token_indices)
-        torch.isnan(dq).any()
-        torch.isnan(dk).any()
-        torch.isnan(dv).any()
         return dq.to(q), dk.to(k), dv.to(v), None, None, None, None, None, None, None, None
 
 
