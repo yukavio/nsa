@@ -102,7 +102,7 @@ def attention_ref(
         qk = torch.einsum("bthd,bshd->bhts", q, k)
     else:
         qk = torch.einsum("bthd,bshd->bhts", q, k)
-    compress_score = torch.softmax(qk, dim=-1).to(torch.float32)
+    compress_score = torch.softmax(qk, dim=-1)
     scores = qk * scale
 
     if window_size[0] >= 0 or window_size[1] >= 0:

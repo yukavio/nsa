@@ -184,6 +184,22 @@ def _attn_bwd_preprocess(O, DO,  #
     tl.store(Delta + off_z * N_CTX * H + off_h + off_m * H, delta)
 
 
+@triton.jit
+def bwd_attn_mul(attn_ptr, d_attn_ptr, o_ptr, H:tl.constexpr, CTX_Q:tl.constexpr, CTX_KV: tl.constexpr, CTX_KV_UPPER: tl.constexpr):
+    off = tl.program_id(0) * H * CTX_Q * CTX_KV + tl.program_id(1) * CTX_Q * CTX_KV + tl.program_id(2) * CTX_KV
+    attn_ptr += off
+    d_attn_ptr += off
+    o_ptr += off
+    off_d = tl.arange(0, CTX_KV_UPPER)
+    # load
+    attn = tl.load(attn_ptr+off_d, mask=off_d<CTX_KV, other=0)
+    d_attn = tl.load(d_attn_ptr+off_d, mask=off_d<CTX_KV, other=0)
+    t = attn*d_attn
+    sum_data = tl.sum(t, axis=0)
+    data = t-sum_data*attn
+    # write-back
+    tl.store(o_ptr+off_d, data, mask=off_d<CTX_KV)
+
 
 @triton.jit
 def _attn_bwd_only_dkv(Q, K, V, sm_scale,  #
@@ -423,16 +439,16 @@ class _attention(torch.autograd.Function):
         s = torch.einsum("bthd, bshd->bhts", q, k)
         s = torch.nn.functional.softmax(s, dim=-1)
 
-        return o, s.to(torch.float32)
+        return o, s
 
     @staticmethod
     def backward(ctx, do, ds):
         q, k, v, o, M = ctx.saved_tensors
-        q.contiguous()
-        o.contiguous()
-        do.contiguous()
-        k.contiguous()
-        v.contiguous()
+        q = q.contiguous()
+        o = o.contiguous()
+        do = do.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
         assert do.is_contiguous()
         assert q.stride() == o.stride() == do.stride()
         assert k.stride() == v.stride()
@@ -497,11 +513,13 @@ class _attention(torch.autograd.Function):
             s = torch.nn.functional.softmax(s, dim=-1)
             
             # backward softmax
-            ds = s * (ds - (ds*s).sum(-1, keepdim=True))
-            
-            # backward einsum
-            dq += torch.einsum("bhts,bshd->bthd", ds, k.to(ds.dtype))
-            dk += torch.einsum("bhts,bthd->bshd", ds, q.to(ds.dtype))
+            d_attn = torch.empty_like(s)
+            grid = (s.shape[0], s.shape[1], s.shape[2])
+            bwd_attn_mul[grid](s, ds, d_attn, s.shape[1], s.shape[2], s.shape[3], triton.next_power_of_2(s.shape[3]))
+            del s
+            del ds
+            dq += torch.einsum("bhts,bshd->bthd", d_attn, k.to(d_attn.dtype))
+            dk += torch.einsum("bhts,bthd->bshd", d_attn, q.to(d_attn.dtype))
         
         return dq, dk, dv, None, None, None, None
 
