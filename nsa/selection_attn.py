@@ -734,9 +734,6 @@ class ParallelNSAFunction(torch.autograd.Function):
             scale=ctx.scale,
             offsets=ctx.offsets,
             token_indices=ctx.token_indices)
-        torch.isnan(dq).any()
-        torch.isnan(dk).any()
-        torch.isnan(dv).any()
         return dq.to(q), dk.to(k), dv.to(v), None, None, None, None, None, None, None, None
 
 

@@ -142,4 +142,3 @@ def attention_ref(
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
     return output.to(dtype=dtype_og), compress_score
 
-
