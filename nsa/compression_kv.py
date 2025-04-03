@@ -303,8 +303,8 @@ class KVCompressor(nn.Module):
         B = cu_seq_len.shape[0] - 1
         ck = k.reshape(B, -1, H, D).permute(0, 2, 3, 1).reshape(B*H, D, -1)  # B, T, H, D -> BH, D, T
         cv = v.reshape(B, -1, H, D).permute(0, 2, 3, 1).reshape(B*H, D, -1)
-        ck = self.compressor_k(ck).reshape(B, H, D, -1).permute(0, 3, 1, 2)
-        cv = self.compressor_v(cv).reshape(B, H, D, -1).permute(0, 3, 1, 2)
+        ck = self.compressor_k(ck).reshape(B, H, D, -1).permute(0, 3, 1, 2).contiguous()
+        cv = self.compressor_v(cv).reshape(B, H, D, -1).permute(0, 3, 1, 2).contiguous()
         if group is not None:
             ck = repeat(ck, "b s h d -> b s (h g) d", g=group)
             cv = repeat(cv, "b s h d -> b s (h g) d", g=group)

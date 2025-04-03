@@ -105,7 +105,6 @@ class NSAAttention(nn.Module):
             cv,
             self.compression_stride,
             self.compression_block,
-            None,
             causal,
             self.softmax_scale,
         )
