@@ -428,6 +428,11 @@ class _attention(torch.autograd.Function):
     @staticmethod
     def backward(ctx, do, ds):
         q, k, v, o, M = ctx.saved_tensors
+        q.is_contiguous()
+        o.is_contiguous()
+        do.is_contiguous()
+        k.is_contiguous()
+        v.is_contiguous()
         assert do.is_contiguous()
         assert q.stride() == o.stride() == do.stride()
         assert k.stride() == v.stride()
