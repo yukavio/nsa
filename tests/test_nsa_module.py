@@ -9,7 +9,7 @@ torch.manual_seed(10)
 bs, num_q_head, num_kv_head, head_dim = 1, 64, 4, 128
 compress_block_size, compress_block_stride = 64, 16
 selection_block, selected_block_count = 64, 32
-seq_len = 1024*8
+seq_len = 1024*32
 
 dtype = torch.bfloat16
 device = "cuda"

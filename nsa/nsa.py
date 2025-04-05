@@ -116,7 +116,7 @@ class NSAAttention(nn.Module):
         score = score.reshape(-1, *score.shape[2:])
         score = self.pooler(score)
         score = score.reshape(bs, num_kv_head, *score.shape[-2:])  # -> B, H, T1, T2
-        indices = torch.topk(score, self.selected_block_count, dim=3).indices # B, H, T, S
+        indices = torch.topk(score, self.selected_block_count, dim=3).indices # B, H, T1, S
         indices = indices.transpose(1, 2)
 
         k = k.reshape(bs, -1, num_kv_head, head_qk_dim)

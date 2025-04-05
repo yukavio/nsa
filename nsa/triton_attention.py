@@ -1,8 +1,9 @@
+# This File is copy and edited from https://triton-lang.org/main/getting-started/tutorials/index.html
 import torch
 import math
 import triton
 import triton.language as tl
-
+from .utils import softmax_kernel
 
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q,  #
@@ -186,7 +187,7 @@ def _attn_bwd_preprocess(O, DO,  #
 
 @triton.jit
 def bwd_attn_mul(attn_ptr, d_attn_ptr, o_ptr, H:tl.constexpr, CTX_Q:tl.constexpr, CTX_KV: tl.constexpr, CTX_KV_UPPER: tl.constexpr):
-    off = tl.program_id(0) * H * CTX_Q * CTX_KV + tl.program_id(1) * CTX_Q * CTX_KV + tl.program_id(2) * CTX_KV
+    off = tl.program_id(0).to(tl.int64) * H * CTX_Q * CTX_KV + tl.program_id(1).to(tl.int64) * CTX_Q * CTX_KV + tl.program_id(2).to(tl.int64) * CTX_KV
     attn_ptr += off
     d_attn_ptr += off
     o_ptr += off
@@ -435,10 +436,11 @@ class _attention(torch.autograd.Function):
         ctx.causal = causal
         ctx.block_stride = block_stride
         ctx.block_size = block_size
-
         s = torch.einsum("bthd, bshd->bhts", q, k)
-        s = torch.nn.functional.softmax(s, dim=-1)
-
+        #s = torch.nn.functional.softmax(s, dim=-1)
+        softmax_grid = (256, )
+        n_row, n_col, block_size = s.numel()//s.shape[-1], s.shape[-1], triton.next_power_of_2(s.shape[-1])
+        softmax_kernel[softmax_grid](s, s, s.stride(2), s.stride(2), n_row, n_col, block_size, 4)
         return o, s
 
     @staticmethod
@@ -510,17 +512,21 @@ class _attention(torch.autograd.Function):
         if ds is not None:
             # Recompute s
             s = torch.einsum("bthd, bshd->bhts", q, k) 
-            s = torch.nn.functional.softmax(s, dim=-1)
+            #print(torch.cuda.max_memory_allocated()/1024**3)
+            softmax_grid = (256, )
+            n_row, n_col, block_size = s.numel()//s.shape[-1], s.shape[-1], triton.next_power_of_2(s.shape[-1])
+            softmax_kernel[softmax_grid](s, s, s.stride(2), s.stride(2), n_row, n_col, block_size, 4)
+            #s = torch.nn.functional.softmax(s, dim=-1)
+            #print(torch.cuda.max_memory_allocated()/1024**3)
             
             # backward softmax
-            d_attn = torch.empty_like(s)
+            #d_attn = torch.empty_like(s)
+            d_attn = s
             grid = (s.shape[0], s.shape[1], s.shape[2])
             bwd_attn_mul[grid](s, ds, d_attn, s.shape[1], s.shape[2], s.shape[3], triton.next_power_of_2(s.shape[3]))
-            del s
-            del ds
             dq += torch.einsum("bhts,bshd->bthd", d_attn, k.to(d_attn.dtype))
             dk += torch.einsum("bhts,bthd->bshd", d_attn, q.to(d_attn.dtype))
-        
+        #print(torch.cuda.max_memory_allocated()/1024**3)
         return dq, dk, dv, None, None, None, None
 
 
