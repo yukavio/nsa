@@ -247,8 +247,8 @@ def _attn_bwd_only_dkv(Q, K, V, sm_scale,  #
     dk = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float32)
 
     # load K and V: they stay in SRAM throughout the inner loop.
-    k = tl.load(K + offs_n[:, None] * stride_ktok + offs_k[None, :] * stride_kd)
-    v = tl.load(V + offs_n[:, None] * stride_ktok + offs_k[None, :] * stride_kd)
+    k = tl.load(K + offs_n[:, None] * stride_ktok + offs_k[None, :] * stride_kd, mask=offs_n[:, None]<KV_CTX, other=0)
+    v = tl.load(V + offs_n[:, None] * stride_ktok + offs_k[None, :] * stride_kd, mask=offs_n[:, None]<KV_CTX, other=0)
 
     num_steps = Q_CTX  // BLOCK_M1
 
@@ -367,8 +367,8 @@ def _attn_bwd_only_dq(Q, K, V, sm_scale,  #
     curr_n = start_n
     step_n = BLOCK_N2
     for blk_idx in range(num_steps):
-        kT = tl.load(kT_ptrs)
-        vT = tl.load(vT_ptrs)
+        kT = tl.load(kT_ptrs, mask=offs_n[None, :]<KV_CTX, other=0)
+        vT = tl.load(vT_ptrs, mask=offs_n[None, :]<KV_CTX, other=0)
         qk = tl.dot(q, kT)
         p = tl.math.exp2(qk - m)
         # Autoregressive masking.
