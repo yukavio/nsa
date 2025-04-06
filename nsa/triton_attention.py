@@ -20,11 +20,11 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
     for start_n in range(lo, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
-        k = tl.load(K_block_ptr)
+        k = tl.load(K_block_ptr, boundary_check=(1,), padding_option="zero")
         qk = tl.dot(q, k)
         if STAGE == 3:
             mask = offs_m[:, None] >= (start_n + offs_n[None, :])*block_stride+block_size
-            qk = qk * qk_scale + tl.where(mask, 0, -1.0e6)
+            qk = qk * qk_scale + tl.where(mask, 0, -1.0e5)
             m_ij = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_ij[:, None]
         else:
@@ -38,7 +38,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         # -- update output accumulator --
         acc = acc * alpha[:, None]
         # update acc
-        v = tl.load(V_block_ptr)
+        v = tl.load(V_block_ptr, boundary_check=(0,), padding_option="zero")
 
         p = p.to(q.dtype)
         acc += tl.dot(p, v)
@@ -56,8 +56,8 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
 # re-tuning.
 configs = [
     triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
-    for BM in [64, 128]\
-    for BN in [32, 64]\
+    for BM in [64]\
+    for BN in [64]\
     for s in [3, 4, 7]\
     for w in [4, 8]\
 ]
@@ -71,7 +71,7 @@ def keep(conf):
     return True
 
 
-@triton.autotune(list(filter(keep, configs)), key=["N_CTX", "HEAD_DIM"])
+# @triton.autotune(list(filter(keep, configs)), key=["N_CTX", "HEAD_DIM"])
 @triton.jit
 def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
               stride_qz, stride_qh, stride_qm, stride_qk,  #
@@ -88,9 +88,8 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
               ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
     start_m = tl.program_id(0)
-    off_hz = tl.program_id(1)
-    off_z = (off_hz // H).to(tl.int64)
-    off_h = (off_hz % H).to(tl.int64)
+    off_z = tl.program_id(1).to(tl.int64)
+    off_h = tl.program_id(2).to(tl.int64)
     qo_offset = off_z * stride_qz + off_h * stride_qh
     kv_offset = off_z * stride_kz + off_h * stride_kh
 
@@ -139,7 +138,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     qk_scale = sm_scale
     qk_scale *= 1.44269504  # 1/log(2)
     # load q: it will stay in SRAM throughout
-    q = tl.load(Q_block_ptr)
+    q = tl.load(Q_block_ptr, boundary_check=(0,), padding_option="zero")
     # stage 2: on-band
 
     acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,  #
@@ -153,7 +152,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     acc = acc / l_i[:, None]
     m_ptrs = M + off_z * Q_CTX * H + offs_m * H + off_h
     tl.store(m_ptrs, m_i)
-    tl.store(O_block_ptr, acc.to(Out.type.element_ty))
+    tl.store(O_block_ptr, acc.to(Out.type.element_ty), boundary_check=(0,))
     if start_m == 0 and STAGE==3:
         clear_block_ptr = tl.make_block_ptr(
             base=Out + qo_offset,
@@ -413,10 +412,9 @@ class _attention(torch.autograd.Function):
             sm_scale = 1 / math.sqrt(HEAD_DIM_Q)
 
         M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
-
-        grid = lambda args: (triton.cdiv(q.shape[1], args["BLOCK_M"]), q.shape[0] * q.shape[2], 1)
+        grid = lambda args: (triton.cdiv(q.shape[1], args["BLOCK_M"]), q.shape[0], q.shape[2])
         ctx.grid = grid
-        _attn_fwd[grid](
+        kernel = _attn_fwd[grid](
             q, k, v, sm_scale, M, o,  #
             q.stride(0), q.stride(2), q.stride(1), q.stride(3),  #
             k.stride(0), k.stride(2), k.stride(1), k.stride(3),  #
@@ -428,6 +426,8 @@ class _attention(torch.autograd.Function):
             block_size=block_size,
             HEAD_DIM=HEAD_DIM_K,  #
             STAGE=stage,  #
+            BLOCK_M=64,
+            BLOCK_N=64,
             **extra_kern_args)
 
         ctx.save_for_backward(q, k, v, o, M)
