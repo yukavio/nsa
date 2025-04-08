@@ -94,12 +94,13 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     start_m = tl.program_id(0)
     off_z = tl.program_id(1).to(tl.int64)
     off_h = tl.program_id(2).to(tl.int64)
-    qo_offset = off_z * stride_qz + off_h * stride_qh
+    q_offset = off_z * stride_qz + off_h * stride_qh
+    o_offset = off_z * stride_oz + off_h * stride_oh
     kv_offset = off_z * stride_kz + off_h * stride_kh
 
     # block pointers
     Q_block_ptr = tl.make_block_ptr(
-        base=Q + qo_offset,
+        base=Q + q_offset,
         shape=(Q_CTX, HEAD_DIM),
         strides=(stride_qm, stride_qk),
         offsets=(start_m * BLOCK_M, 0),
@@ -124,7 +125,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
         order=(0, 1),
     )
     O_block_ptr = tl.make_block_ptr(
-        base=Out + qo_offset,
+        base=Out + o_offset,
         shape=(Q_CTX, HEAD_DIM),
         strides=(stride_om, stride_on),
         offsets=(start_m * BLOCK_M, 0),
@@ -159,7 +160,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     tl.store(O_block_ptr, acc.to(Out.type.element_ty), boundary_check=(0,))
     if start_m == 0 and STAGE==3:
         clear_block_ptr = tl.make_block_ptr(
-            base=Out + qo_offset,
+            base=Out + o_offset,
             shape=(block_size, HEAD_DIM),
             strides=(stride_om, stride_on),
             offsets=(0, 0),
@@ -440,7 +441,6 @@ class _attention(torch.autograd.Function):
             BLOCK_M=64,
             BLOCK_N=64,
             **extra_kern_args)
-
         ctx.save_for_backward(q, k, v, o, M)
         ctx.sm_scale = sm_scale
         ctx.HEAD_DIM = HEAD_DIM_K
