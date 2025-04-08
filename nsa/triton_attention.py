@@ -13,7 +13,11 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
                     block_stride: tl.constexpr, block_size: tl.constexpr,
                     STAGE: tl.constexpr, offs_m: tl.constexpr, offs_n: tl.constexpr,  #
                     N_CTX: tl.constexpr, fp8_v: tl.constexpr):
-    lo, hi = 0, N_CTX
+    lo = 0
+    if STAGE==3:
+        hi = (((start_m*BLOCK_M + BLOCK_M)-block_size+block_stride-1)//block_stride+BLOCK_N-1)//BLOCK_N*BLOCK_N
+    else:
+        hi = N_CTX
     K_block_ptr = tl.advance(K_block_ptr, (0, lo))
     V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
     # loop over k, v and update accumulator
@@ -24,7 +28,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         qk = tl.dot(q, k)
         if STAGE == 3:
             mask = offs_m[:, None] >= (start_n + offs_n[None, :])*block_stride+block_size
-            qk = qk * qk_scale + tl.where(mask, 0, -1.0e5)
+            qk = qk * qk_scale + tl.where(mask, 0, -1.0e6)
             m_ij = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_ij[:, None]
         else:
@@ -239,8 +243,6 @@ def _attn_bwd_only_dkv(Q, K, V, sm_scale,  #
     offs_k = tl.arange(0, HEAD_DIM)
 
     start_n = pid * BLOCK_N1
-    start_m = 0
-
     offs_n = start_n + tl.arange(0, BLOCK_N1)
 
     dv = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float32)
@@ -250,7 +252,13 @@ def _attn_bwd_only_dkv(Q, K, V, sm_scale,  #
     k = tl.load(K + offs_n[:, None] * stride_ktok + offs_k[None, :] * stride_kd, mask=offs_n[:, None]<KV_CTX, other=0)
     v = tl.load(V + offs_n[:, None] * stride_ktok + offs_k[None, :] * stride_kd, mask=offs_n[:, None]<KV_CTX, other=0)
 
-    num_steps = Q_CTX  // BLOCK_M1
+    #num_steps = Q_CTX  // BLOCK_M1
+    if CAUSAL:
+        start_m = (start_n * block_stride + block_size) // BLOCK_M1 * BLOCK_M1
+        num_steps = (Q_CTX-start_m)  // BLOCK_M1
+    else:
+        start_m = 0
+        num_steps = Q_CTX  // BLOCK_M1
 
     # Compute dK and dV for non-masked blocks.
     offs_m = start_m + tl.arange(0, BLOCK_M1)
@@ -341,7 +349,10 @@ def _attn_bwd_only_dq(Q, K, V, sm_scale,  #
 
     # THIS BLOCK DOES DQ:
     start_m = pid * BLOCK_M2
-    end_n = KV_CTX
+    if CAUSAL:
+        end_n = (((start_m + BLOCK_M2)-block_size+block_stride-1)//block_stride+BLOCK_N2-1)//BLOCK_N2*BLOCK_N2
+    else:
+        end_n = KV_CTX
 
     offs_m = start_m + tl.arange(0, BLOCK_M2)
 
@@ -526,7 +537,7 @@ class _attention(torch.autograd.Function):
             bwd_attn_mul[grid](s, ds, d_attn, s.shape[1], s.shape[2], s.shape[3], triton.next_power_of_2(s.shape[3]))
             dq += torch.einsum("bhts,bshd->bthd", d_attn, k.to(d_attn.dtype))
             dk += torch.einsum("bhts,bthd->bshd", d_attn, q.to(d_attn.dtype))
-        #print(torch.cuda.max_memory_allocated()/1024**3)
+        # print(torch.cuda.max_memory_allocated()/1024**3)
         return dq, dk, dv, None, None, None, None
 
 

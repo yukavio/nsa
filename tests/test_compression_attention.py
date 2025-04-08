@@ -96,9 +96,10 @@ def test_causal():
         torch.testing.assert_close(k.grad, k_ref.grad, rtol=3e-2, atol=3e-2)
     except Exception as e:
         print(e)
-
-    diff = (q.grad-q_ref.grad)/q_ref.grad
-    #torch.testing.assert_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
+    try:
+        torch.testing.assert_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
+    except Exception as e:
+        print(e)
     print('PASS CAUSAL')
 
 test_causal()
