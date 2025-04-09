@@ -54,10 +54,10 @@ class NSAAttention(nn.Module):
         self.compressor = KVCompressor(
             compression_stride, compression_block, head_dim, device, dtype
         )
-        kernel_size = selection_block // compression_stride + 1
-        padding = compression_block // compression_stride - 2
-        stride = selection_block // compression_stride
-        self.pooler = torch.nn.AvgPool1d(kernel_size, stride, padding, True)
+        self.pool_kernel_size = selection_block // compression_stride + 1
+        self.pool_padding = compression_block // compression_stride - 2
+        self.pool_stride = selection_block // compression_stride
+        # self.pooler = torch.nn.AvgPool1d(kernel_size, stride, padding, True)
         self.gating = nn.Linear(head_dim, 3, device=device, dtype=dtype)
 
     def forward(
@@ -99,7 +99,7 @@ class NSAAttention(nn.Module):
         # compress attention
         ck, cv, compress_cu_kv_len = self.compressor(k, v, cu_seqlens_k, num_q_head//k.shape[1]) # ck/cv: B, T, H*q, D
 
-        cmp_o, attn_score = attn_func(
+        cmp_o, indices = attn_func(
             q,
             ck,
             cv,
@@ -107,18 +107,15 @@ class NSAAttention(nn.Module):
             self.compression_block,
             causal,
             self.softmax_scale,
+            num_kv_head,
+            bs,
+            self.pool_kernel_size,
+            self.pool_stride,
+            self.pool_padding,
+            self.selected_block_count,
         )
 
-        # gating
         gating_score = self.gating(q)  # b, t, hq, 3
-        # selection and local attention
-        score = attn_score.reshape(bs, num_kv_head, -1, *attn_score.shape[-2:]).sum(2)
-        score = score.reshape(-1, *score.shape[2:])
-        score = self.pooler(score)
-        score = score.reshape(bs, num_kv_head, *score.shape[-2:])  # -> B, H, T1, T2
-        indices = torch.topk(score, self.selected_block_count, dim=3).indices # B, H, T1, S
-        indices = indices.transpose(1, 2)
-
         k = k.reshape(bs, -1, num_kv_head, head_qk_dim)
         v = v.reshape(bs, -1, num_kv_head, head_v_dim)
         o = selection_attention(
