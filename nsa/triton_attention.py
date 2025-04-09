@@ -407,7 +407,7 @@ def _attn_bwd_only_dq(Q, K, V, sm_scale,  #
 
 class _attention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, block_stride, block_size, causal, sm_scale):
+    def forward(ctx, q, k, v, block_stride, block_size, causal, sm_scale, pool_num_kv_head=0, pool_bs=0, pool_kernel_size=0, pool_stride=0, pool_padding=0, select_block_count=0, fused=False):
         # B, T, H, D
 
         # shape constraints
@@ -425,7 +425,7 @@ class _attention(torch.autograd.Function):
         M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
         grid = lambda args: (triton.cdiv(q.shape[1], args["BLOCK_M"]), q.shape[0], q.shape[2])
         ctx.grid = grid
-        kernel = _attn_fwd[grid](
+        _attn_fwd[grid](
             q, k, v, sm_scale, M, o,  #
             q.stride(0), q.stride(2), q.stride(1), q.stride(3),  #
             k.stride(0), k.stride(2), k.stride(1), k.stride(3),  #
@@ -452,10 +452,22 @@ class _attention(torch.autograd.Function):
         softmax_grid = (256, )
         n_row, n_col, block_size = s.numel()//s.shape[-1], s.shape[-1], triton.next_power_of_2(s.shape[-1])
         softmax_kernel[softmax_grid](s, s, s.stride(2), s.stride(2), n_row, n_col, block_size, 4)
-        return o, s
+        
+        if fused:
+            s = s.reshape(pool_bs, pool_num_kv_head, -1, *s.shape[-2:]).sum(2)
+            s = s.reshape(-1, *s.shape[2:])
+            s = torch.nn.functional.avg_pool1d(s, pool_kernel_size, pool_stride, pool_padding, True)
+            s = s.reshape(pool_bs, pool_num_kv_head, *s.shape[-2:])  # -> B, H, T1, T2
+            indices = torch.topk(s, select_block_count, dim=3).indices # B, H, T1, S
+            indices = indices.transpose(1, 2)
+        
+            return o, indices
+        else:
+            return o, s
 
     @staticmethod
     def backward(ctx, do, ds):
+        print(f"ds sum: {ds.sum()}")
         q, k, v, o, M = ctx.saved_tensors
         q = q.contiguous()
         o = o.contiguous()
@@ -520,25 +532,25 @@ class _attention(torch.autograd.Function):
             num_warps=NUM_WARPS,  #
             num_stages=NUM_STAGES  #
         )
-        if ds is not None:
-            # Recompute s
-            s = torch.einsum("bthd, bshd->bhts", q, k) 
-            #print(torch.cuda.max_memory_allocated()/1024**3)
-            softmax_grid = (256, )
-            n_row, n_col, block_size = s.numel()//s.shape[-1], s.shape[-1], triton.next_power_of_2(s.shape[-1])
-            softmax_kernel[softmax_grid](s, s, s.stride(2), s.stride(2), n_row, n_col, block_size, 4)
-            #s = torch.nn.functional.softmax(s, dim=-1)
-            #print(torch.cuda.max_memory_allocated()/1024**3)
+        # if ds is not None:
+        #     # Recompute s
+        #     s = torch.einsum("bthd, bshd->bhts", q, k) 
+        #     #print(torch.cuda.max_memory_allocated()/1024**3)
+        #     softmax_grid = (256, )
+        #     n_row, n_col, block_size = s.numel()//s.shape[-1], s.shape[-1], triton.next_power_of_2(s.shape[-1])
+        #     softmax_kernel[softmax_grid](s, s, s.stride(2), s.stride(2), n_row, n_col, block_size, 4)
+        #     #s = torch.nn.functional.softmax(s, dim=-1)
+        #     #print(torch.cuda.max_memory_allocated()/1024**3)
             
-            # backward softmax
-            #d_attn = torch.empty_like(s)
-            d_attn = s
-            grid = (s.shape[0], s.shape[1], s.shape[2])
-            bwd_attn_mul[grid](s, ds, d_attn, s.shape[1], s.shape[2], s.shape[3], triton.next_power_of_2(s.shape[3]))
-            dq += torch.einsum("bhts,bshd->bthd", d_attn, k.to(d_attn.dtype))
-            dk += torch.einsum("bhts,bthd->bshd", d_attn, q.to(d_attn.dtype))
+        #     # backward softmax
+        #     #d_attn = torch.empty_like(s)
+        #     d_attn = s
+        #     grid = (s.shape[0], s.shape[1], s.shape[2])
+        #     bwd_attn_mul[grid](s, ds, d_attn, s.shape[1], s.shape[2], s.shape[3], triton.next_power_of_2(s.shape[3]))
+        #     dq += torch.einsum("bhts,bshd->bthd", d_attn, k.to(d_attn.dtype))
+        #     dk += torch.einsum("bhts,bthd->bshd", d_attn, q.to(d_attn.dtype))
         # print(torch.cuda.max_memory_allocated()/1024**3)
-        return dq, dk, dv, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None
 
 
 flash_attn_func = _attention.apply
