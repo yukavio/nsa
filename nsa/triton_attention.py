@@ -407,7 +407,7 @@ def _attn_bwd_only_dq(Q, K, V, sm_scale,  #
 
 class _attention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, block_stride, block_size, causal, sm_scale, pool_num_kv_head=0, pool_bs=0, pool_kernel_size=0, pool_stride=0, pool_padding=0, select_block_count=0):
+    def forward(ctx, q, k, v, block_stride, block_size, causal, sm_scale, pool_num_kv_head=0, pool_kernel_size=0, pool_stride=0, pool_padding=0, select_block_count=0):
         # B, T, H, D
 
         # shape constraints
@@ -453,10 +453,11 @@ class _attention(torch.autograd.Function):
         n_row, n_col, block_size = s.numel()//s.shape[-1], s.shape[-1], triton.next_power_of_2(s.shape[-1])
         softmax_kernel[softmax_grid](s, s, s.stride(2), s.stride(2), n_row, n_col, block_size, 4)
         
-        s = s.reshape(pool_bs, pool_num_kv_head, -1, *s.shape[-2:]).sum(2)
+        bs = q.shape[0]
+        s = s.reshape(bs, pool_num_kv_head, -1, *s.shape[-2:]).sum(2)
         s = s.reshape(-1, *s.shape[2:])
         s = torch.nn.functional.avg_pool1d(s, pool_kernel_size, pool_stride, pool_padding, True)
-        s = s.reshape(pool_bs, pool_num_kv_head, *s.shape[-2:])  # -> B, H, T1, T2
+        s = s.reshape(bs, pool_num_kv_head, *s.shape[-2:])  # -> B, H, T1, T2
         indices = torch.topk(s, select_block_count, dim=3).indices # B, H, T1, S
         indices = indices.transpose(1, 2)
     
