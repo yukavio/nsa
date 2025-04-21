@@ -158,7 +158,9 @@ def naive_nsa(q: torch.Tensor,
     if head_first:
         o_slc = rearrange(o_slc, 'b t h d -> b h t d')
         o_swa = rearrange(o_swa, 'b t h d -> b h t d')
-
+    if window_size > 0:
+        o_slc[0][0] = 0.0
+        o_slc[1][63] = 0.0
     return o_slc.to(dtype) + o_swa.to(dtype) if o_swa is not None else o_slc.to(dtype)
 
 
@@ -167,6 +169,7 @@ def naive_nsa(q: torch.Tensor,
 
 if __name__ == "__main__":
     B, T, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 32, 2, 32, torch.float16
+    window_size = 128
     torch.random.manual_seed(0)
     q = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
     k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
@@ -199,11 +202,14 @@ if __name__ == "__main__":
         block_indices=block_indices,
         block_counts=block_counts,
         block_size=block_size,
+        window_size=window_size
     )
     #NOTE: We replace nan in ref to 0.0 to match the result of tri and make bwd correct
     # Use silice instead of in-place
-    ref[0][0] = 0.0
-    ref[1][63] = 0.0
+    # if window_size > 0, we set this before local attentnion
+    if window_size == 0:
+        ref[0][0] = 0.0
+        ref[1][63] = 0.0
     
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
@@ -211,7 +217,10 @@ if __name__ == "__main__":
     ref_dv, v.grad = v.grad.clone(), None
     ref_dg_slc, g_slc.grad = g_slc.grad.clone(), None
     
-    
+    # ref_dq[torch.isnan(ref_dq)] = 0.0
+    # ref_dk[torch.isnan(ref_dk)] = 0.0
+    # ref_dv[torch.isnan(ref_dv)] = 0.0
+    # ref_dg_slc[torch.isnan(ref_dg_slc)] = 0.0
     ref_dv[0][-1] = 0.0
     ref_dv[1][-1] = 0.0
     ref_dg_slc[0][0] = 0.0
@@ -228,7 +237,9 @@ if __name__ == "__main__":
         block_indices=block_indices,
         block_size=block_size,
         block_counts=block_counts,
+        window_size=window_size
     )
+    
 
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
@@ -258,3 +269,4 @@ if __name__ == "__main__":
     torch.testing.assert_close(ref_dg_slc, tri_dg_slc, atol=1e-2, rtol=1e-2)
     
     print("test passed")
+    
