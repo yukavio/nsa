@@ -1,8 +1,10 @@
 # This File is copy and edited from https://triton-lang.org/main/getting-started/tutorials/index.html
-import torch
 import math
+
+import torch
 import triton
 import triton.language as tl
+
 from .utils import softmax_kernel
 
 @triton.jit
@@ -32,8 +34,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
             m_ij = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_ij[:, None]
         else:
-            m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
-            qk = qk * qk_scale - m_ij[:, None]
+            qk *= qk_scale
+            m_ij = tl.maximum(m_i, tl.max(qk, 1))
+            qk -= m_ij[:, None]
         p = tl.math.exp2(qk)
         l_ij = tl.sum(p, 1)
         # -- update m_i and l_i
@@ -459,7 +462,7 @@ class _attention(torch.autograd.Function):
         s = torch.nn.functional.avg_pool1d(s, pool_kernel_size, pool_stride, pool_padding, True)
         s = s.reshape(bs, pool_num_kv_head, *s.shape[-2:])  # -> B, H, T1, T2
         indices = torch.topk(s, select_block_count, dim=3).indices # B, H, T1, S
-        indices = indices.transpose(1, 2)
+        indices = indices.transpose(1, 2).contiguous()
     
         return o, indices
 
@@ -479,7 +482,7 @@ class _attention(torch.autograd.Function):
         dv = torch.empty_like(v)
         BATCH, Q_CTX, Q_HEAD = q.shape[:3]
         _, KV_CTX, KV_HEAD = k.shape[:3]
-        NUM_WARPS, NUM_STAGES = 4, 5
+        NUM_WARPS, NUM_STAGES = 4, 4
         
         BLK_SLICE_FACTOR = 2
         RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
