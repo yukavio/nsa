@@ -7,9 +7,10 @@ import triton.language as tl
 
 from .utils import softmax_kernel
 
+
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q,  #
-                    K_block_ptr, V_block_ptr,  #
+                    K_block_ptr, V_block_ptr, score_ptr,  #
                     start_m, qk_scale,  #
                     BLOCK_M: tl.constexpr, HEAD_DIM: tl.constexpr, BLOCK_N: tl.constexpr,  #
                     block_stride: tl.constexpr, block_size: tl.constexpr,
@@ -30,10 +31,13 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         qk = tl.dot(q, k)
         if STAGE == 3:
             mask = offs_m[:, None] >= (start_n + offs_n[None, :])*block_stride+block_size
-            qk = qk * qk_scale + tl.where(mask, 0, -1.0e6)
+            tl.store(score_ptr, qk.to(q.dtype), mask=(start_n + offs_n[None, :])<N_CTX)
+            qk = qk + tl.where(mask, 0, -1.0e6)
+            qk *= qk_scale
             m_ij = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_ij[:, None]
         else:
+            tl.store(score_ptr, qk.to(q.dtype), mask=(start_n + offs_n[None, :])<N_CTX)
             qk *= qk_scale
             m_ij = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_ij[:, None]
@@ -53,6 +57,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         m_i = m_ij
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
+        score_ptr += BLOCK_N
     
     return acc, l_i, m_i
 
@@ -80,11 +85,12 @@ def keep(conf):
 
 # @triton.autotune(list(filter(keep, configs)), key=["N_CTX", "HEAD_DIM"])
 @triton.jit
-def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
+def _attn_fwd(Q, K, V, sm_scale, M, Out, Score, #
               stride_qz, stride_qh, stride_qm, stride_qk,  #
               stride_kz, stride_kh, stride_kn, stride_kk,  #
               stride_vz, stride_vh, stride_vk, stride_vn,  #
               stride_oz, stride_oh, stride_om, stride_on,  #
+              stride_sz, stride_sh, stride_sm, stride_sn,  #
               Z, H, N_CTX, Q_CTX, #
               block_stride: tl.constexpr,
               block_size: tl.constexpr,
@@ -100,6 +106,8 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     q_offset = off_z * stride_qz + off_h * stride_qh
     o_offset = off_z * stride_oz + off_h * stride_oh
     kv_offset = off_z * stride_kz + off_h * stride_kh
+    score_ptr = Score + off_z * stride_sz + off_h * stride_sh
+    score_ptr = score_ptr + (start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]) * stride_sm + tl.arange(0, BLOCK_N)[None, :]
 
     # block pointers
     Q_block_ptr = tl.make_block_ptr(
@@ -147,9 +155,8 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     qk_scale *= 1.44269504  # 1/log(2)
     # load q: it will stay in SRAM throughout
     q = tl.load(Q_block_ptr, boundary_check=(0,), padding_option="zero")
-    # stage 2: on-band
 
-    acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,  #
+    acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr, score_ptr,  #
                                     start_m, qk_scale,  #
                                     BLOCK_M, HEAD_DIM, BLOCK_N,  #
                                     block_stride, block_size, #
@@ -427,14 +434,16 @@ class _attention(torch.autograd.Function):
             sm_scale = 1 / math.sqrt(HEAD_DIM_Q)
 
         M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
+        s = torch.zeros(q.shape[0], q.shape[2], q.shape[1], k.shape[1], device=q.device, dtype=q.dtype)
         grid = lambda args: (triton.cdiv(q.shape[1], args["BLOCK_M"]), q.shape[0], q.shape[2])
         ctx.grid = grid
         _attn_fwd[grid](
-            q, k, v, sm_scale, M, o,  #
+            q, k, v, sm_scale, M, o, s,  #
             q.stride(0), q.stride(2), q.stride(1), q.stride(3),  #
             k.stride(0), k.stride(2), k.stride(1), k.stride(3),  #
             v.stride(0), v.stride(2), v.stride(1), v.stride(3),  #
             o.stride(0), o.stride(2), o.stride(1), o.stride(3),  #
+            s.stride(0), s.stride(1), s.stride(2), s.stride(3),  # B, H, ..
             q.shape[0], q.shape[2],  #
             N_CTX=k.shape[1], Q_CTX=q.shape[1],  #
             block_stride=block_stride,
@@ -450,8 +459,7 @@ class _attention(torch.autograd.Function):
         ctx.causal = causal
         ctx.block_stride = block_stride
         ctx.block_size = block_size
-        s = torch.einsum("bthd, bshd->bhts", q, k)
-        #s = torch.nn.functional.softmax(s, dim=-1)
+        #s = torch.einsum("bthd, bshd->bhts", q, k)
         softmax_grid = (256, )
         n_row, n_col, block_size = s.numel()//s.shape[-1], s.shape[-1], triton.next_power_of_2(s.shape[-1])
         softmax_kernel[softmax_grid](s, s, s.stride(2), s.stride(2), n_row, n_col, block_size, 4)
