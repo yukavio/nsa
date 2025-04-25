@@ -434,7 +434,7 @@ class _attention(torch.autograd.Function):
             sm_scale = 1 / math.sqrt(HEAD_DIM_Q)
 
         M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
-        s = torch.zeros(q.shape[0], q.shape[2], q.shape[1], k.shape[1], device=q.device, dtype=q.dtype)
+        s = torch.full((q.shape[0], q.shape[2], q.shape[1], k.shape[1]), -1e6, device=q.device, dtype=q.dtype)
         grid = lambda args: (triton.cdiv(q.shape[1], args["BLOCK_M"]), q.shape[0], q.shape[2])
         ctx.grid = grid
         _attn_fwd[grid](
@@ -459,7 +459,9 @@ class _attention(torch.autograd.Function):
         ctx.causal = causal
         ctx.block_stride = block_stride
         ctx.block_size = block_size
-        #s = torch.einsum("bthd, bshd->bhts", q, k)
+        # s_ref = torch.einsum("bthd, bshd->bhts", q, k)
+        # diff = s-s_ref
+        # import pdb; pdb.set_trace()
         softmax_grid = (256, )
         n_row, n_col, block_size = s.numel()//s.shape[-1], s.shape[-1], triton.next_power_of_2(s.shape[-1])
         softmax_kernel[softmax_grid](s, s, s.stride(2), s.stride(2), n_row, n_col, block_size, 4)
@@ -471,7 +473,6 @@ class _attention(torch.autograd.Function):
         s = s.reshape(bs, pool_num_kv_head, *s.shape[-2:])  # -> B, H, T1, T2
         indices = torch.topk(s, select_block_count, dim=3).indices # B, H, T1, S
         indices = indices.transpose(1, 2).contiguous()
-    
         return o, indices
 
     @staticmethod
