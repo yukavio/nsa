@@ -361,7 +361,7 @@ def _attn_bwd_only_dq(Q, K, V, sm_scale,  #
     # THIS BLOCK DOES DQ:
     start_m = pid * BLOCK_M2
     if CAUSAL:
-        end_n = (((start_m + BLOCK_M2)-block_size+block_stride-1)//block_stride+BLOCK_N2-1)//BLOCK_N2*BLOCK_N2
+        end_n = tl.minimum((((start_m + BLOCK_M2)-block_size+block_stride-1)//block_stride+BLOCK_N2-1)//BLOCK_N2*BLOCK_N2, KV_CTX)
     else:
         end_n = KV_CTX
 
