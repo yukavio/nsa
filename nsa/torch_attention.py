@@ -48,6 +48,20 @@ def construct_local_mask(
         return mask
 
 
+def get_indices(s, pool_num_kv_head=0, pool_kernel_size=0, pool_stride=0, 
+                pool_padding=0, select_block_count=0):
+    bs = s.shape[0]
+    s = s.reshape(bs, pool_num_kv_head, -1, *s.shape[-2:]).sum(2)
+    s = s.reshape(-1, *s.shape[2:])
+    s = torch.nn.functional.avg_pool1d(s, pool_kernel_size, pool_stride, 
+                                    pool_padding, True)
+    s = s.reshape(bs, pool_num_kv_head, *s.shape[-2:])  # -> B, H, T1, T2
+    indices = torch.topk(s, select_block_count, dim=3).indices # B, H, T1, S
+    indices = indices.transpose(1, 2).contiguous()
+    return indices
+
+
+
 # Copy from https://github.com/Dao-AILab/flash-attention/blob/main/tests/test_flash_attn.py
 def attention_ref(
     q,
@@ -66,7 +80,12 @@ def attention_ref(
     upcast=False,
     reorder_ops=False,
     key_leftpad=None,
-    scale=None
+    scale=None,
+    pool_num_kv_head=0,
+    pool_kernel_size=0,
+    pool_stride=0,
+    pool_padding=0,
+    select_block_count=0
 ):
     """
     Arguments:
@@ -103,6 +122,7 @@ def attention_ref(
     else:
         qk = torch.einsum("bthd,bshd->bhts", q, k)
     compress_score = torch.softmax(qk, dim=-1)
+    indicis = get_indices(compress_score, pool_num_kv_head, pool_kernel_size, pool_stride, pool_padding, select_block_count)
     scores = qk * scale
 
     if window_size[0] >= 0 or window_size[1] >= 0:
@@ -140,5 +160,5 @@ def attention_ref(
     output = torch.einsum("bhts,bshd->bthd", attention_drop, v * dropout_scaling)
     if query_padding_mask is not None:
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
-    return output.to(dtype=dtype_og), compress_score
+    return output.to(dtype=dtype_og), indicis
 
