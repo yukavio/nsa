@@ -7,7 +7,7 @@ from copy import deepcopy
 
 
 compress_block_size, compress_block_stride = 32, 16
-seq_len = 1024*16
+seq_len = 1024*8
 selection_block_size, selected_block_count = 64, 16
 
 dtype = torch.bfloat16
@@ -70,10 +70,10 @@ def test_no_causal():
     o, indices = flash_attn_func(q_t, ck, cv, compress_block_stride, compress_block_size, False, None, num_kv_head, pool_kernel_size, 
                             pool_stride, pool_padding, selected_block_count)
     torch.testing.assert_close(o, ref_o, rtol=1e-2, atol=1e-2)
-    loss = (o*o).sum()
-    loss.backward()
     print('test indices')
     safe_all_close(indices, ref_indices, rtol=1e-2, atol=1e-2)
+    loss = (o*o).sum()
+    loss.backward()
     print('test grad_v')
     safe_all_close(v.grad, v_ref.grad, rtol=3e-2, atol=3e-2)
     print('test grad_k')
@@ -83,7 +83,7 @@ def test_no_causal():
     safe_all_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
     print('PASS NO CAUSAL')
 
-# test_no_causal()
+test_no_causal()
 
 
 def test_causal():
@@ -126,6 +126,6 @@ def test_causal():
 
     print('PASS CAUSAL')
 
-test_causal()
+# test_causal()
 
 

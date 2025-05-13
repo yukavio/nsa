@@ -121,9 +121,10 @@ def attention_ref(
         qk = torch.einsum("bthd,bshd->bhts", q, k)
     else:
         qk = torch.einsum("bthd,bshd->bhts", q, k)
-    compress_score = torch.softmax(qk, dim=-1)
-    indicis = get_indices(compress_score, pool_num_kv_head, pool_kernel_size, pool_stride, pool_padding, select_block_count)
+
     scores = qk * scale
+    compress_score = torch.softmax(scores, dim=-1)
+    indicis = get_indices(compress_score, pool_num_kv_head, pool_kernel_size, pool_stride, pool_padding, select_block_count)
 
     if window_size[0] >= 0 or window_size[1] >= 0:
         local_mask = construct_local_mask(

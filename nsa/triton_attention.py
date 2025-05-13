@@ -5,7 +5,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .utils import softmax_kernel
+from .utils import softmax_kernel, inplcace_softmax_kernel, fast_softmax_kernel
 
 
 @triton.jit
@@ -459,12 +459,13 @@ class _attention(torch.autograd.Function):
         ctx.causal = causal
         ctx.block_stride = block_stride
         ctx.block_size = block_size
-        # s_ref = torch.einsum("bthd, bshd->bhts", q, k)
-        # diff = s-s_ref
-        # import pdb; pdb.set_trace()
-        softmax_grid = (256, )
+
         n_row, n_col, block_size = s.numel()//s.shape[-1], s.shape[-1], triton.next_power_of_2(s.shape[-1])
-        softmax_kernel[softmax_grid](s, s, s.stride(2), s.stride(2), n_row, n_col, block_size, 4)
+        softmax_grid = (s.shape[0], s.shape[1], 256)
+        #s_ref = torch.softmax(torch.einsum("bthd, bshd->bhts", q, k)*sm_scale, dim=-1)
+        fast_softmax_kernel[softmax_grid](s, s, M, s.shape[2], n_col, block_size, 4, sm_scale)
+        # print(s-s_ref)
+        #import pdb; pdb.set_trace()
         
         bs = q.shape[0]
         s = s.reshape(bs, pool_num_kv_head, -1, *s.shape[-2:]).sum(2)
