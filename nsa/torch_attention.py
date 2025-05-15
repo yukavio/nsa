@@ -124,6 +124,7 @@ def attention_ref(
 
     scores = qk * scale
     compress_score = torch.softmax(scores, dim=-1)
+    compress_score[:, :, :block_size, :] = 0
     indicis = get_indices(compress_score, pool_num_kv_head, pool_kernel_size, pool_stride, pool_padding, select_block_count)
 
     if window_size[0] >= 0 or window_size[1] >= 0:

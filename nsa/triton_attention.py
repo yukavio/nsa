@@ -31,9 +31,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         qk = tl.dot(q, k)
         if STAGE == 3:
             mask = offs_m[:, None] >= (start_n + offs_n[None, :])*block_stride+block_size
-            tl.store(score_ptr, qk.to(q.dtype), mask=(start_n + offs_n[None, :])<N_CTX)
-            qk = qk + tl.where(mask, 0, -1.0e6)
+            tl.store(score_ptr, qk.to(q.dtype), mask=mask)
             qk *= qk_scale
+            qk = qk + tl.where(mask, 0, -1.0e12)
             m_ij = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_ij[:, None]
         else:
@@ -460,12 +460,24 @@ class _attention(torch.autograd.Function):
         ctx.block_stride = block_stride
         ctx.block_size = block_size
 
-        n_row, n_col, block_size = s.numel()//s.shape[-1], s.shape[-1], triton.next_power_of_2(s.shape[-1])
-        softmax_grid = (s.shape[0], s.shape[1], 256)
+        n_row, n_col, BLOCK = s.numel()//s.shape[-1], s.shape[-1], triton.next_power_of_2(s.shape[-1])
+        softmax_grid = (s.shape[0], s.shape[1], 32)
+        # k = s[0][0][0] * sm_scale
+        # a = torch.exp(k).sum()
+        # b = torch.exp2(M[0][0][0])
+        # c = a/b
+        # import pdb; pdb.set_trace()
         #s_ref = torch.softmax(torch.einsum("bthd, bshd->bhts", q, k)*sm_scale, dim=-1)
-        fast_softmax_kernel[softmax_grid](s, s, M, s.shape[2], n_col, block_size, 4, sm_scale)
-        # print(s-s_ref)
-        #import pdb; pdb.set_trace()
+        # out = torch.empty_like(s)
+        fast_softmax_kernel[softmax_grid](s, s, M, s.shape[2], n_col, BLOCK, 4, sm_scale, block_size, causal)
+        # print(out[0][0][32][0])
+        # print(s[0][0][32][0])
+        # print(M[0][32][0])
+        # print(torch.exp(s[0][0][128]*sm_scale) / torch.exp2(M[0][128][0]))
+        #print(s_ref-out)
+        # import pdb; pdb.set_trace()
+        # exit()
+        
         
         bs = q.shape[0]
         s = s.reshape(bs, pool_num_kv_head, -1, *s.shape[-2:]).sum(2)
