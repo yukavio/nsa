@@ -17,9 +17,9 @@ torch.set_default_dtype(dtype)
 torch.manual_seed(9)
 
 
-def safe_all_close(out, ref, rtol, atol):
+def safe_all_close(out, ref, rtol=1e-2, atol=1e-2):
     try:
-        torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(out, ref, rtol=rtol, atol=rtol)
     except Exception as e:
         print(e)
 
@@ -83,7 +83,7 @@ def test_no_causal():
     safe_all_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
     print('PASS NO CAUSAL')
 
-# test_no_causal()
+
 
 
 def test_causal():
@@ -126,6 +126,7 @@ def test_causal():
 
     print('PASS CAUSAL')
 
-test_causal()
 
-
+if __name__ == '__main__':
+    test_causal()
+    # test_no_causal()

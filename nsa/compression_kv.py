@@ -287,7 +287,7 @@ class KVCompressorVarlen(nn.Module):
     def reset_parameters(self) -> None:
         init.kaiming_uniform_(self.k_weight, a=math.sqrt(5))
         init.kaiming_uniform_(self.v_weight, a=math.sqrt(5))
-            
+
 
 class KVCompressor(nn.Module):
     def __init__(self, block_stride, block_size, head_dim, device, dtype):
@@ -295,8 +295,8 @@ class KVCompressor(nn.Module):
         factory_kwargs = {"device": device, "dtype": dtype}
         self.block_stride = block_stride
         self.block_size = block_size
-        self.compressor_k = nn.Conv1d(head_dim, head_dim, block_size, block_stride, **factory_kwargs)
-        self.compressor_v = nn.Conv1d(head_dim, head_dim, block_size, block_stride, **factory_kwargs)
+        self.compressor_k = nn.Conv1d(head_dim, head_dim, block_size, block_stride, bias=False, **factory_kwargs)
+        self.compressor_v = nn.Conv1d(head_dim, head_dim, block_size, block_stride, bias=False, **factory_kwargs)
 
     def forward(self, k, v, cu_seq_len, group=None):
         BT, H, D = k.shape
@@ -312,4 +312,3 @@ class KVCompressor(nn.Module):
         return ck, cv, cu_seq_len
 
     
-
