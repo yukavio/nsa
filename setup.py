@@ -49,8 +49,11 @@ setup(
         "License :: OSI Approved :: BSD License",
         "Operating System :: Unix",
     ],
-    packages=find_packages(),
+    packages=find_packages('third_party/ThunderKittens'),
     #ext_modules=ext_modules,
     #cmdclass={"build_ext": BuildExtension},
-    #install_requires=["absl-py", "numpy", "torch"],
+    install_requires=[
+        "flash-attn",
+        "flash-linear-attention@git+https://github.com/fla-org/flash-linear-attention"
+        ],
 )
