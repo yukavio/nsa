@@ -49,7 +49,7 @@ setup(
         "License :: OSI Approved :: BSD License",
         "Operating System :: Unix",
     ],
-    packages=find_packages('third_party/ThunderKittens'),
+    packages=find_packages(),
     #ext_modules=ext_modules,
     #cmdclass={"build_ext": BuildExtension},
     install_requires=[
