@@ -6,3 +6,5 @@
 *.fatbin
 *.egg-info
 *__pycache__*
+*.egg
+build
