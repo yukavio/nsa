@@ -415,7 +415,7 @@ def _attn_bwd_only_dq(Q, K, V, sm_scale,  #
     dq *= LN2
     tl.store(dq_ptrs, dq)
     
-
+@torch.compile
 class _attention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, block_stride, block_size, causal, sm_scale, pool_num_kv_head=0, pool_kernel_size=0, pool_stride=0, pool_padding=0, select_block_count=0):

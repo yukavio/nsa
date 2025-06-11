@@ -44,8 +44,6 @@ class NSAFunctor:
         self.softmax_scale = softmax_scale
         self.drop_p = attention_dropout
         self.deterministic = deterministic
-        # self.compression_attn = CompressionAttn(compression_stride, compression_block, head_dim, device, dtype)
-        # self.selection_attn = SelectionAttn(selection_block, selected_block_count, compression_stride, comression_block)
         self.sliding_window = sliding_window
         self.selected_block_count = selected_block_count
         self.selection_block_size = selection_block
@@ -54,7 +52,6 @@ class NSAFunctor:
         self.pool_kernel_size = selection_block // compression_stride + 1
         self.pool_padding = compression_block // compression_stride - 2
         self.pool_stride = selection_block // compression_stride
-        # self.pooler = torch.nn.AvgPool1d(kernel_size, stride, padding, True)
 
     def forward(
         self,
@@ -64,7 +61,7 @@ class NSAFunctor:
         compressor_weight_k: torch.Tensor,
         compressor_weight_v: torch.Tensor,
         gating_weight: torch.Tensor,
-        cu_seqlens: torch.Tensor,
+        cu_seqlens: torch.Tensor = None,
         max_seqlen: torch.Tensor = None,
         cu_seqlens_k: torch.Tensor = None,
         max_seqlen_k: torch.Tensor = None,
@@ -89,11 +86,9 @@ class NSAFunctor:
         causal = self.causal if causal is None else causal
         cu_seqlens_k = cu_seqlens if cu_seqlens_k is None else cu_seqlens_k
         # compress attention
-        num_q_head, head_qk_dim = q.shape[1:]
-
-        bs = cu_seqlens_k.numel() - 1
-        num_q_head, head_qk_dim = q.shape[1:]
-        num_token, num_kv_head, head_v_dim = v.shape
+        bs = q.shape[0] if cu_seqlens_k is None else cu_seqlens_k.numel() - 1
+        num_q_head, head_qk_dim = q.shape[-2:]
+        num_kv_head, head_v_dim = v.shape[-2:]
         q = q.reshape(bs, -1, num_q_head, head_qk_dim)  
         gating_score = f.linear(q, gating_weight)  # b, t, hq, 3
         k = k.reshape(bs, -1, num_kv_head, head_qk_dim)
