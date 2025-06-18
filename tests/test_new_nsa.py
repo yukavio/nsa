@@ -4,7 +4,7 @@ from nsa import selection_attention
 from nsa.nsa import NSAAttention as _NSAAttention
 from nsa.new_nsa import NSAAttention, MergedNSAAttention, NSAFunctor
 from test_compression_attention import safe_all_close
-torch.manual_seed(9)
+torch.manual_seed(10)
 
 bs, num_q_head, num_kv_head, head_dim = 1, 64, 4, 128
 compress_block_size, compress_block_stride = 64, 16
@@ -26,9 +26,6 @@ ref_attn = _NSAAttention(head_dim, True, None, 0, device=device, dtype=dtype)
 cmp_wk = ref_attn.compressor.compressor_k.weight
 cmp_wv = ref_attn.compressor.compressor_v.weight
 
-attn_functor = NSAFunctor(head_dim, True, None)
-attn_func = MergedNSAAttention
-
 ref_o = ref_attn(q, k, v, cu_seq_len, 0, causal=True)
 ref_loss = (ref_o*ref_o).sum()
 ref_loss.backward()
@@ -38,7 +35,6 @@ assert not torch.isnan(q.grad).any(), 'q.grad output has nan.'
 assert not torch.isnan(k.grad).any(), 'k.grad output has nan.'
 assert not torch.isnan(v.grad).any(), 'v.grad output has nan.'
 
-
 q_grad_ref = q.grad.detach()
 k_grad_ref = k.grad.detach()
 v_grad_ref = v.grad.detach()
@@ -46,26 +42,44 @@ cmp_wk_ref = cmp_wk.grad.detach()
 cmp_wv_ref = cmp_wv.grad.detach()
 gating_ref = ref_attn.gating.weight.grad.detach()
 
-del q.grad, k.grad, v.grad, cmp_wv.grad, cmp_wk.grad
 
 
-# o = attn_func.forward(q, k, v, ref_attn.compressor.compressor_k.weight, ref_attn.compressor.compressor_v.weight, 
-#                       ref_attn.gating.weight, cu_seq_len)
-o = attn_func.apply(attn_functor, q, k, v, ref_attn.gating.weight, cmp_wk, cmp_wv, 
-                    cu_seq_len)
-loss = (o*o).sum()
-loss.backward()
-print('test output')
-torch.testing.assert_close(o, ref_o, rtol=1e-2, atol=1e-2)
-print('test q_grad')
-safe_all_close(q.grad, q_grad_ref)
-print('test k_grad')
-safe_all_close(k.grad, k_grad_ref)
-print('test v_grad')
-safe_all_close(v.grad, v_grad_ref)
-print('test cmp_wk_grad')
-safe_all_close(cmp_wk.grad, cmp_wk_ref)
-print('test cmp_wv_grad')
-safe_all_close(cmp_wv.grad, cmp_wv_ref)
-print('test gating grad')
-safe_all_close(ref_attn.gating.weight.grad, gating_ref)
+def test(seperated, k, v):
+    attn_functor = NSAFunctor(head_dim, True, None, seperated_kv=seperated)
+    attn_func = MergedNSAAttention
+
+    del q.grad, k.grad, v.grad, cmp_wv.grad, cmp_wk.grad
+    o = attn_func.apply(attn_functor, q, k, v, ref_attn.gating.weight, cmp_wk, cmp_wv, 
+                        cu_seq_len)
+    loss = (o*o).sum()
+    loss.backward()
+    print('test output')
+    torch.testing.assert_close(o, ref_o, rtol=1e-2, atol=1e-2)
+    print('test q_grad')
+    safe_all_close(q.grad, q_grad_ref)
+    if seperated:
+        print('test k_grad')
+        k_grad = k.grad.reshape(-1, 3, num_kv_head, head_dim).float().sum(1).reshape(k_grad_ref.shape)
+        v_grad = v.grad.reshape(-1, 3, num_kv_head, head_dim).float().sum(1).reshape(v_grad_ref.shape)
+        safe_all_close(k_grad.to(torch.bfloat16), k_grad_ref)
+        print('test v_grad')
+        safe_all_close(v_grad.to(torch.bfloat16), v_grad_ref)
+    else:
+        print('test k_grad')
+        safe_all_close(k.grad, k_grad_ref)
+        print('test v_grad')
+        safe_all_close(v.grad, v_grad_ref)
+        print('test cmp_wk_grad')
+        safe_all_close(cmp_wk.grad, cmp_wk_ref)
+        print('test cmp_wv_grad')
+        safe_all_close(cmp_wv.grad, cmp_wv_ref)
+
+    print('test gating grad')
+    safe_all_close(ref_attn.gating.weight.grad, gating_ref)
+    
+print('*'*100)
+test(False, k, v)
+print('*'*100)
+k = k.repeat(1, 3, 1).detach().requires_grad_()
+v = v.repeat(1, 3, 1).detach().requires_grad_()
+test(True, k, v)
