@@ -273,7 +273,6 @@ def _attn_bwd_only_dkv(Q, K, V, sm_scale,  #
 
     # Compute dK and dV for non-masked blocks.
     offs_m = start_m + tl.arange(0, BLOCK_M1)
-    offs_n = start_n + tl.arange(0, BLOCK_N1)
     offs_k = tl.arange(0, HEAD_DIM)
     qT_ptrs = Q + offs_m[None, :] * stride_tok + offs_k[:, None] * stride_d
     do_ptrs = DO + offs_m[:, None] * stride_tok + offs_k[None, :] * stride_d
@@ -310,12 +309,12 @@ def _attn_bwd_only_dkv(Q, K, V, sm_scale,  #
         do_ptrs += step_m * stride_tok
 
     dv_ptrs = DV + offs_n[:, None] * stride_ktok + offs_k[None, :] * stride_kd
-    tl.store(dv_ptrs, dv)
+    tl.store(dv_ptrs, dv, offs_n[:, None]<KV_CTX)
 
     # Write back dK.
     dk *= sm_scale
     dk_ptrs = DK + offs_n[:, None] * stride_ktok + offs_k[None, :] * stride_kd
-    tl.store(dk_ptrs, dk)
+    tl.store(dk_ptrs, dk, offs_n[:, None]<KV_CTX)
 
 
 @triton.jit
@@ -524,7 +523,6 @@ class _attention(torch.autograd.Function):
             num_warps=NUM_WARPS,  #
             num_stages=NUM_STAGES  #
         )
-
         BLOCK_M_q, BLOCK_N_q = 128, 32
         grid_q = (Q_CTX // BLOCK_M_q, BATCH, Q_HEAD)
 
@@ -541,7 +539,7 @@ class _attention(torch.autograd.Function):
             num_warps=NUM_WARPS,  #
             num_stages=NUM_STAGES  #
         )
-        
+
         # NOTE: We do not need backward ds here
         return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None
 
