@@ -120,10 +120,10 @@ class NSAFunctor:
             sliding_v = v
         ck = f.conv1d(ck, compressor_weight_k, stride=self.compression_stride, padding=0)
         cv = f.conv1d(cv, compressor_weight_v, stride=self.compression_stride, padding=0)
-        ck = ck.reshape(bs, num_kv_head, head_qk_dim, -1).permute(0, 3, 1, 2).contiguous()
-        cv = cv.reshape(bs, num_kv_head, head_v_dim, -1).permute(0, 3, 1, 2).contiguous()
-        ck = repeat(ck, "b s h d -> b s (h g) d", g=num_q_head//num_kv_head)
-        cv = repeat(cv, "b s h d -> b s (h g) d", g=num_q_head//num_kv_head)
+        ck = ck.reshape(bs, num_kv_head, head_qk_dim, -1).permute(0, 3, 1, 2)
+        cv = cv.reshape(bs, num_kv_head, head_v_dim, -1).permute(0, 3, 1, 2)
+        ck = repeat(ck, "b s h d -> b s (h g) d", g=num_q_head//num_kv_head).contiguous()
+        cv = repeat(cv, "b s h d -> b s (h g) d", g=num_q_head//num_kv_head).contiguous()
         
         cmp_o, indices = attn_func(
             q,
