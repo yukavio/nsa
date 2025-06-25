@@ -155,7 +155,6 @@ class NSAFunctor:
         if self.seperated_kv:
             sliding_o = flash_attn_v3_func(q, sliding_k, sliding_v, softmax_scale=self.softmax_scale, causal=self.causal, 
                                            window_size=(self.sliding_window-1, 0))[0]
-            torch.save(sliding_o, 'test.pth')
             o = torch.addcmul(o, gating_score[..., 1].unsqueeze(-1), sliding_o)
         o = torch.addcmul(o, gating_score[..., 2].unsqueeze(-1), cmp_o)
         return o.reshape(-1, *o.shape[-2:])
