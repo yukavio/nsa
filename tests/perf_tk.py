@@ -38,8 +38,8 @@ def benchmark_attention(configurations):
         print(f"Timing forward and backward pass for B={B}, H={H}, N={N}, D={D}, causal={causal}")
 
         q = torch.randn(B, N, H, D, dtype=torch.bfloat16, device='cuda', requires_grad=False).contiguous()
-        k = torch.randn(B, N//32, H//16, D, dtype=torch.bfloat16, device='cuda', requires_grad=False).contiguous()
-        v = torch.randn(B, N//32, H//16, D, dtype=torch.bfloat16, device='cuda', requires_grad=False).contiguous()
+        k = torch.randn(B, N, H//16, D, dtype=torch.bfloat16, device='cuda', requires_grad=False).contiguous()
+        v = torch.randn(B, N, H//16, D, dtype=torch.bfloat16, device='cuda', requires_grad=False).contiguous()
 
         grad_output = torch.randn_like(q, requires_grad=False).contiguous()
         
