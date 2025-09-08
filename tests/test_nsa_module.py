@@ -22,7 +22,7 @@ v = torch.randn(bs*seq_len, num_kv_head, head_dim, requires_grad=True)
 t = torch.Tensor([0] + [seq_len] * bs)
 cu_seq_len = torch.cumsum(t, dim=0).to(torch.int32).to(device)
 
-attn = NSAAttention(head_dim, 0, True, None, 0, device=device, dtype=dtype)
+attn = NSAAttention(head_dim, True, None, 0, device=device, dtype=dtype)
 
 o = attn(q, k, v, cu_seq_len, 0, causal=True)
 assert not torch.isnan(o).any(), 'forward output has nan.'

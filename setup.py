@@ -52,5 +52,8 @@ setup(
     packages=find_packages(),
     #ext_modules=ext_modules,
     #cmdclass={"build_ext": BuildExtension},
-    #install_requires=["absl-py", "numpy", "torch"],
+    install_requires=[
+        "flash-attn",
+        "flash-linear-attention@git+https://github.com/fla-org/flash-linear-attention"
+        ],
 )

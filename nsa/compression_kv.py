@@ -287,7 +287,7 @@ class KVCompressorVarlen(nn.Module):
     def reset_parameters(self) -> None:
         init.kaiming_uniform_(self.k_weight, a=math.sqrt(5))
         init.kaiming_uniform_(self.v_weight, a=math.sqrt(5))
-            
+
 
 class KVCompressor(nn.Module):
     def __init__(self, block_stride, block_size, head_dim, device, dtype):
@@ -295,21 +295,20 @@ class KVCompressor(nn.Module):
         factory_kwargs = {"device": device, "dtype": dtype}
         self.block_stride = block_stride
         self.block_size = block_size
-        self.compressor_k = nn.Conv1d(head_dim, head_dim, block_size, block_stride, **factory_kwargs)
-        self.compressor_v = nn.Conv1d(head_dim, head_dim, block_size, block_stride, **factory_kwargs)
+        self.compressor_k = nn.Conv1d(head_dim, head_dim, block_size, block_stride, bias=False, **factory_kwargs)
+        self.compressor_v = nn.Conv1d(head_dim, head_dim, block_size, block_stride, bias=False, **factory_kwargs)
 
     def forward(self, k, v, cu_seq_len, group=None):
         BT, H, D = k.shape
         B = cu_seq_len.shape[0] - 1
         ck = k.reshape(B, -1, H, D).permute(0, 2, 3, 1).reshape(B*H, D, -1)  # B, T, H, D -> BH, D, T
         cv = v.reshape(B, -1, H, D).permute(0, 2, 3, 1).reshape(B*H, D, -1)
-        ck = self.compressor_k(ck).reshape(B, H, D, -1).permute(0, 3, 1, 2).contiguous()
-        cv = self.compressor_v(cv).reshape(B, H, D, -1).permute(0, 3, 1, 2).contiguous()
+        ck = self.compressor_k(ck).reshape(B, H, D, -1).permute(0, 3, 1, 2)
+        cv = self.compressor_v(cv).reshape(B, H, D, -1).permute(0, 3, 1, 2)
         if group is not None:
-            ck = repeat(ck, "b s h d -> b s (h g) d", g=group)
-            cv = repeat(cv, "b s h d -> b s (h g) d", g=group)
+            ck = repeat(ck, "b s h d -> b s (h g) d", g=group).contiguous()
+            cv = repeat(cv, "b s h d -> b s (h g) d", g=group).contiguous()
 
-        return ck, cv, cu_seq_len
+        return ck.contiguous(), cv.contiguous(), cu_seq_len
 
     
-

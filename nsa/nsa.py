@@ -58,7 +58,7 @@ class NSAAttention(nn.Module):
         self.pool_padding = compression_block // compression_stride - 2
         self.pool_stride = selection_block // compression_stride
         # self.pooler = torch.nn.AvgPool1d(kernel_size, stride, padding, True)
-        self.gating = nn.Linear(head_dim, 3, device=device, dtype=dtype)
+        self.gating = nn.Linear(head_dim, 3, bias=False, device=device, dtype=dtype)
 
     def forward(
         self,
@@ -113,6 +113,7 @@ class NSAAttention(nn.Module):
             self.pool_padding,
             self.selected_block_count,
         )
+        
 
         gating_score = self.gating(q)  # b, t, hq, 3
         k = k.reshape(bs, -1, num_kv_head, head_qk_dim)
@@ -133,4 +134,3 @@ class NSAAttention(nn.Module):
         o = torch.addcmul(o, gating_score[..., 2].unsqueeze(-1), cmp_o)
 
         return o.reshape(-1, *o.shape[-2:])
-

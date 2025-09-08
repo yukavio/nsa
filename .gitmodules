@@ -1,0 +1,4 @@
+[submodule "third_party/ThunderKittens"]
+	path = third_party/ThunderKittens
+	url = https://github.com/yukavio/ThunderKittens.git
+	branch = nsa
